@@ -6,6 +6,12 @@ usage.json
 *.tmp
 *.log
 
+# Credential scratch files: the token tools read a value from a file so the
+# terminal is never involved, and that file must not be committed by accident.
+.token*
+credentials*.yaml
+.credentials*
+
 # Local notes / scratch files that are not part of the published plugins
 usage-panel-research.md
 

@@ -150,11 +150,25 @@ export function sumMonthTokens(payload) {
   // Cache reads are about 98% of the raw sum and are billed at roughly 2% of the
   // cache-miss rate. Reporting the raw sum alone would badly overstate what the
   // account actually processed for money, so both are kept: `tokens` is the raw
-  // total and `billed` is what is charged (everything except the cache reads).
+  // total and `billed` is what is charged.
+  //
+  // `billed` is built by ADDING the billed types, never by subtracting the cache
+  // reads from the total. The subtraction form silently depends on "cache reads
+  // are the bulk", so any other token type in the payload — the console does
+  // report a `PROMPT_TOKEN` bucket — would be swept into the billed figure
+  // unnoticed. Adding the known-billed types makes that impossible.
+  //
+  // Official rule: an input token is either a cache hit or a cache miss; the
+  // miss rate also covers the fresh input that produces the cache entry.
   const cacheHits = byType.PROMPT_CACHE_HIT_TOKEN ?? 0;
+  let billed = 0;
+  for (const [type, amount] of Object.entries(byType)) {
+    if (type === 'PROMPT_CACHE_HIT_TOKEN') continue;
+    billed += amount;
+  }
   return {
     tokens,
-    billed: Math.max(0, tokens - cacheHits),
+    billed,
     cacheHits,
     requests,
     byModel,
@@ -366,6 +380,26 @@ export async function scanHistory(options) {
   return { total, months: collected, stoppedBy, failures };
 }
 
+/** Which numeric fields a persisted history must carry to be reusable as-is. */
+const PAYLOAD_FIELDS = ['months', 'cost', 'tokens', 'billed', 'cacheHits', 'requests'];
+
+/**
+ * Is this persisted payload still in the shape the current code produces?
+ *
+ * A cache file written by an older release can lack fields a newer one relies
+ * on — a seeded payload missing `billed` would silently render a raw token total
+ * as if it were the billed figure. Rejecting an outdated payload makes the next
+ * refresh scan again instead of trusting stale semantics.
+ */
+export function historyPayloadComplete(payload) {
+  if (payload === null || payload === undefined || typeof payload !== 'object') return false;
+  if (!Number.isFinite(payload.scannedAt)) return false;
+  for (const field of PAYLOAD_FIELDS) {
+    if (!Number.isFinite(payload[field])) return false;
+  }
+  return true;
+}
+
 /**
  * Build the platform-history reader the Host mounts.
  *
@@ -393,6 +427,7 @@ export function createPlatformHistory(options) {
     failures: 0,
     monthsFetched: 0,
     requestFailures: 0,
+    refusedSeed: 0,
     lastError: '',
     lastFailure: null,
     tokenMissing: 0,
@@ -490,11 +525,18 @@ export function createPlatformHistory(options) {
       });
       return inflight;
     },
-    /** Load a persisted payload written by an earlier process. */
+    /**
+     * Load a persisted payload written by an earlier process. A payload from an
+     * older schema is refused (and dropped) so the next refresh rescans rather
+     * than serving fields that no longer mean what the code assumes.
+     */
     seed(payload) {
-      if (payload === null || payload === undefined || typeof payload !== 'object') return;
-      if (!Number.isFinite(payload.scannedAt)) return;
+      if (!historyPayloadComplete(payload)) {
+        if (payload !== null && payload !== undefined) counters.refusedSeed += 1;
+        return false;
+      }
       cache = { payload, at: payload.scannedAt };
+      return true;
     },
     /** Drop the cache so the next `refresh` scans again (a new credential). */
     invalidate() {

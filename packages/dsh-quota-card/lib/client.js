@@ -35,6 +35,7 @@ window.__ModuleLoader__.load({
     var TICK_MS = 5000;
     var COST_KEY = 'dsh-quota-card.showCost';
     var HEIGHT_KEY = 'dsh-quota-card.height';
+    var UNIT_KEY = 'dsh-quota-card.tokenUnit';
     var STYLE_ID = 'dsh-quota-card-style';
     var CARD_ID = 'dsh-quota-card';
 
@@ -80,6 +81,7 @@ window.__ModuleLoader__.load({
       '#' + CARD_ID + ' .dqc-icon:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1))}',
       '#' + CARD_ID + ' .dqc-icon:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}',
       '#' + CARD_ID + ' .dqc-icon.is-active{color:var(--dsw-alias-brand-primary)}',
+      '#' + CARD_ID + ' .dqc-unit{font-size:11px;font-weight:600;line-height:1}',
       '#' + CARD_ID + ' .dqc-body{display:flex;flex-direction:column;gap:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain}',
       '#' + CARD_ID + ' .dqc-rows{display:flex;flex-direction:column;flex:none}',
       '#' + CARD_ID + ' .dqc-row{display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:5px 0}',
@@ -395,6 +397,7 @@ window.__ModuleLoader__.load({
       lifetimeTokens: '\u7d2f\u8ba1\u7528\u91cf',
       sinceInstall: '\u81ea\u672c\u63d2\u4ef6\u5b89\u88c5\u8d77\u7d2f\u8ba1\uff08\u672c\u5730\u8d26\u672c\uff09',
       platformSource: '\u6765\u81ea DeepSeek \u5f00\u653e\u5e73\u53f0\u5386\u53f2\u8bb0\u5f55',
+      sourceOutdated: '\u7f13\u5b58\u7684\u5386\u53f2\u6570\u636e\u7248\u672c\u8f83\u65e7\uff08\u4e0b\u6b21\u5237\u65b0\u540e\u4f1a\u91cd\u65b0\u7edf\u8ba1\uff09',
       tokensBilled: '\u8ba1\u8d39 token\uff08\u672a\u547d\u4e2d\u7f13\u5b58 + \u7f13\u5b58\u5199\u5165 + \u8f93\u51fa\uff09',
       tokensCached: '\u7f13\u5b58\u547d\u4e2d\u8bfb\u53d6\uff08\u4ec5\u7ea6 2% \u4ef7\uff09',
       tokensTotal: 'token \u603b\u548c\uff08\u542b\u7f13\u5b58\u8bfb\u53d6\uff09',
@@ -408,6 +411,9 @@ window.__ModuleLoader__.load({
       loading: '\u52a0\u8f7d\u4e2d\u2026',
       refresh: '\u5237\u65b0',
       toggleCost: '\u663e\u793a/\u9690\u85cf\u4f30\u7b97\u8d39\u7528',
+      toggleUnit: '\u5207\u6362\u7528\u91cf\u53e3\u5f84\uff08\u8ba1\u8d39 token \u21c4 \u542b\u7f13\u5b58\u603b\u91cf\uff09',
+      unitBilled: '\u53e3\u5f84\uff1a\u8ba1\u8d39 token\uff08\u4e0d\u542b\u7f13\u5b58\u8bfb\u53d6\uff0c\u4ec5\u7ea6 2% \u4ef7\uff09',
+      unitTotal: '\u53e3\u5f84\uff1atoken \u603b\u91cf\uff08\u542b\u7f13\u5b58\u8bfb\u53d6\uff09',
       resize: '\u4e0a\u4e0b\u62d6\u52a8\u8c03\u6574\u5361\u7247\u9ad8\u5ea6\uff08\u53cc\u51fb\u6062\u590d\u81ea\u9002\u5e94\uff09',
       noApiKey: '\u672a\u914d\u7f6e API Key',
       noCredentials: '\u672a\u767b\u5f55 \u00b7 \u672a\u914d\u7f6e API Key',
@@ -434,6 +440,7 @@ window.__ModuleLoader__.load({
       lifetimeTokens: 'Total tokens',
       sinceInstall: 'counted locally, since this plugin was installed',
       platformSource: 'from the DeepSeek platform account history',
+      sourceOutdated: 'cached history is from an older schema (it will rescan on the next refresh)',
       tokensBilled: 'Billed tokens (cache miss + cache write + output)',
       tokensCached: 'Cache-hit reads (billed at ~2%)',
       tokensTotal: 'Total tokens (including cache reads)',
@@ -447,6 +454,9 @@ window.__ModuleLoader__.load({
       loading: 'Loading\u2026',
       refresh: 'Refresh',
       toggleCost: 'Show/hide the estimated cost',
+      toggleUnit: 'Switch the usage unit (billed tokens \u21c4 total incl. cache)',
+      unitBilled: 'Unit: billed tokens (excludes cache reads, billed at ~2%)',
+      unitTotal: 'Unit: total tokens (including cache reads)',
       resize: 'Drag to resize the card (double click for auto height)',
       noApiKey: 'No API key configured',
       noCredentials: 'Not signed in \u00b7 no API key',
@@ -500,9 +510,25 @@ window.__ModuleLoader__.load({
       return false;
     }
 
-    /** The stored card height, or null for auto (hug the content). */
-    function readStoredHeight() {
+    /**
+     * Which token unit the card reports. `false` (the default) is BILLED tokens:
+     * everything except the cache reads, which are billed at about a fiftieth of
+     * a cache miss. `true` is every token the context handled. One unit is used
+     * for today, this month and the account total so the rows stay comparable.
+     */
+    function readTokenUnit() {
       try {
+        var raw = window.localStorage.getItem(UNIT_KEY);
+        if (raw === 'total') return true;
+        if (raw === 'billed') return false;
+      } catch (error) {
+        void error;
+      }
+      return false;
+    }
+
+    /** The stored card height, or null for auto (hug the content). */
+    function readStoredHeight() {      try {
         var raw = window.localStorage.getItem(HEIGHT_KEY);
         if (raw === null) return null;
         var value = Number(raw);
@@ -540,6 +566,9 @@ window.__ModuleLoader__.load({
       var costState = react.useState(readCostPreference);
       var showCost = costState[0];
       var setShowCost = costState[1];
+      var unitState = react.useState(readTokenUnit);
+      var totalUnit = unitState[0];
+      var setTotalUnit = unitState[1];
       // null = auto height (fits the content); a number = the user's own size.
       var bodyState = react.useState(readStoredHeight);
       var bodyHeight = bodyState[0];
@@ -689,6 +718,22 @@ window.__ModuleLoader__.load({
       var platform = snapshot && snapshot.platform ? snapshot.platform : null;
       var balance = snapshot && snapshot.balance ? snapshot.balance : null;
       var showEstimatedCost = showCost || config.showCost === true;
+      // The unit follows the Host default until the gear overrides it locally.
+      var showTotalUnit = totalUnit === null ? config.showTotalTokens === true : totalUnit;
+
+      /** Today/month/cumulative all report in the SAME unit, so they compare. */
+      function metric(bucket) {
+        if (bucket === null || bucket === undefined) return 0;
+        if (showTotalUnit) return bucket.tokens || 0;
+        // A bucket predating the `billed` field would read 0; falling back keeps
+        // a real spend from sitting next to a confident zero.
+        if (!Number.isFinite(bucket.billed)) return bucket.tokens || 0;
+        return bucket.billed;
+      }
+
+      function unitNote(translate) {
+        return showTotalUnit ? translate('unitTotal') : translate('unitBilled');
+      }
 
       var balanceValue;
       var balanceClass = 'dqc-value is-balance';
@@ -721,8 +766,8 @@ window.__ModuleLoader__.load({
 
       var rows = [
         { key: 'balance', label: t('balance'), value: balanceValue, className: balanceClass, title: balanceTitle },
-        { key: 'today', label: t('today'), value: today === null ? '--' : formatTokens(today.tokens) },
-        { key: 'month', label: t('month'), value: month === null ? '--' : formatTokens(month.tokens) },
+        { key: 'today', label: t('today'), value: today === null ? '--' : formatTokens(metric(today)), title: unitNote(t) },
+        { key: 'month', label: t('month'), value: month === null ? '--' : formatTokens(metric(month)), title: unitNote(t) },
         { key: 'cache', label: t('cacheHit'), value: today === null ? '--' : formatPercent(today.cacheHitRate) },
       ];
       // Prefer the console's account-wide history when it is available; fall back
@@ -734,7 +779,18 @@ window.__ModuleLoader__.load({
         // at about a fiftieth of a cache miss. The headline shows the BILLED
         // tokens so the number beside the money means something, and the tooltip
         // breaks the total down.
-        var billedTokens = platform.billed === undefined ? platform.tokens : platform.billed;
+        //
+        // A payload written before the `billed` field existed leaves it at 0 while
+        // `tokens` is large. Printing that 0 beside a real spend would be a
+        // confident lie, so fall back to the raw total and mark it with an `*`.
+        var billedKnown = platform.billed !== undefined && platform.billed > 0;
+        // With the TOTAL unit selected, every row reports the raw total, so the
+        // cumulative row must match it rather than switching units mid-card.
+        var billedTokens = showTotalUnit ? platform.tokens : (billedKnown ? platform.billed : platform.tokens);
+        var approximate = !showTotalUnit && !billedKnown;
+        var tokensExtra = billedKnown
+          ? '\n' + t('tokensBilled') + ': ' + formatTokens(platform.billed)
+          : '';
         rows.push({
           key: 'lifeCost',
           label: t('lifetimeCost'),
@@ -744,14 +800,17 @@ window.__ModuleLoader__.load({
         rows.push({
           key: 'lifeTokens',
           label: t('lifetimeTokens'),
-          value: formatTokens(billedTokens),
-          title: platformSpan + '\n' + t('platformSource')
-            + '\n' + t('tokensBilled') + ': ' + formatTokens(billedTokens)
+          value: formatTokens(billedTokens) + (approximate ? '*' : ''),
+          title: platformSpan + '\n'
+            + (approximate ? t('sourceOutdated') : t('platformSource'))
+            + tokensExtra
             + '\n' + t('tokensCached') + ': ' + formatTokens(platform.cacheHits || 0)
             + '\n' + t('tokensTotal') + ': ' + formatTokens(platform.tokens)
             + '\n' + formatTokens(platform.requests) + ' ' + t('requests'),
         });
       } else if (life !== null) {
+        // The local ledger's own range, reported in the SAME unit as the other
+        // rows so "since install" never silently changes what a number means.
         rows.push({
           key: 'lifeCost',
           label: t('lifetimeCost'),
@@ -761,8 +820,9 @@ window.__ModuleLoader__.load({
         rows.push({
           key: 'lifeTokens',
           label: t('lifetimeTokens'),
-          value: formatTokens(life.tokens),
-          title: (life.from || '--') + ' ~ ' + (life.to || '--') + '\n' + t('sinceInstall'),
+          value: formatTokens(showTotalUnit ? life.tokens : (life.billed ?? life.tokens)),
+          title: (life.from || '--') + ' ~ ' + (life.to || '--') + '\n' + t('sinceInstall')
+            + '\n' + unitNote(t),
         });
       }
       if (showEstimatedCost) {
@@ -877,6 +937,29 @@ window.__ModuleLoader__.load({
                   'button',
                   {
                     type: 'button',
+                    className: 'dqc-icon',
+                    key: 'unit',
+                    title: t('toggleUnit') + '\n' + unitNote(t),
+                    'aria-label': t('toggleUnit'),
+                    'aria-pressed': showTotalUnit,
+                    onClick: function () {
+                      var next = !showTotalUnit;
+                      setTotalUnit(next);
+                      try {
+                        window.localStorage.setItem(UNIT_KEY, next ? 'total' : 'billed');
+                      } catch (error) {
+                        void error;
+                      }
+                    },
+                  },
+                  // The glyph states the current unit: "Σ" for the raw total,
+                  // "¥" for the billed figure.
+                  react.createElement('span', { className: 'dqc-unit' }, showTotalUnit ? '\u03a3' : '\u00a5'),
+                ),
+                react.createElement(
+                  'button',
+                  {
+                    type: 'button',
                     className: showEstimatedCost ? 'dqc-icon is-active' : 'dqc-icon',
                     key: 'gear',
                     title: t('toggleCost'),
@@ -922,6 +1005,7 @@ window.__ModuleLoader__.load({
           'data-status': status,
           'data-tier': tier === null ? 'unknown' : tier.peak ? 'peak' : 'off-peak',
           'data-height': bodyHeight === null ? 'auto' : String(bodyHeight),
+          'data-unit': showTotalUnit ? 'total' : 'billed',
           className: resizing ? 'is-resizing' : undefined,
         },
         children,

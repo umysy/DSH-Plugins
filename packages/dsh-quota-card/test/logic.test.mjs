@@ -25,6 +25,7 @@ import { createLedger } from '../lib/ledger.js';
 import {
   aggregatePlatformUsage,
   foldMonths,
+  historyPayloadComplete,
   monthKey,
   monthRange,
   parsePlatformToken,
@@ -37,6 +38,7 @@ import {
 } from '../lib/platform.js';
 import {
   addTotals,
+  billedTokens,
   cacheHitRate,
   estimateCost,
   formatDuration,
@@ -631,6 +633,19 @@ test('platformAuthFailure recognises the console envelope', () => {
   assert.equal(platformAuthFailure(500, null), false);
 });
 
+test('historyPayloadComplete refuses a cache written by an older release', () => {
+  const current = { months: 2, cost: 295, tokens: 4_261_067_012, billed: 250_000_000, cacheHits: 4_011_067_012, requests: 2124, scannedAt: 1790793511336 };
+  assert.equal(historyPayloadComplete(current), true);
+  // The exact payload an older release persisted: no `billed`, no `cacheHits`.
+  // Seeding it would make the card print a raw total as if it were billed.
+  const older = { months: 2, cost: 295.04, tokens: 4_261_067_012, requests: 2124, scannedAt: 1790793511336 };
+  assert.equal(historyPayloadComplete(older), false);
+  assert.equal(historyPayloadComplete(null), false);
+  assert.equal(historyPayloadComplete({}), false);
+  assert.equal(historyPayloadComplete({ ...current, scannedAt: undefined }), false);
+  assert.equal(historyPayloadComplete({ ...current, billed: 'lots' }), false);
+});
+
 test('tokenLooksValid rejects the shapes that actually get pasted by mistake', () => {
   assert.equal(tokenLooksValid('Y2w1Y52p9rYUwLtzGZMmnG' + 'x'.repeat(44)), true, 'a real 64-char token');
   assert.equal(tokenLooksValid('a'.repeat(16)), true, 'the minimum accepted length');
@@ -845,6 +860,63 @@ test('scanHistory caps how far back it will look', async () => {
   assert.equal(calls, 240);
   assert.equal(total.months, 120);
   assert.equal(total.stoppedBy, 'range-exhausted');
+});
+
+test('billedTokens excludes cache reads, unlike totalTokens', () => {
+  const totals = { inputTokens: 100, cacheReadTokens: 5000, cacheWriteTokens: 20, outputTokens: 30, requests: 3 };
+  assert.equal(totalTokens(totals), 5150, 'the raw context volume, cache reads included');
+  assert.equal(billedTokens(totals), 150, 'uncached input + cache write + output');
+  // Empty and degenerate inputs stay at zero rather than NaN.
+  assert.equal(billedTokens(null), 0);
+  assert.equal(billedTokens(undefined), 0);
+  assert.equal(billedTokens({}), 0);
+  assert.equal(billedTokens({ cacheReadTokens: 999 }), 0, 'cache reads alone are never billed');
+});
+
+test('the local ledger reports both units so the card can switch', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'quota-card-'));
+  const at = bj(2026, 9, 30, 10, 0);
+  const ledger = createLedger({ config: CONFIG, filePath: join(dir, 'usage.json'), now: () => at });
+  ledger.record({
+    at,
+    model: 'deepseek-flash',
+    usage: { inputTokens: 100, cacheReadTokens: 5000, cacheWriteTokens: 20, outputTokens: 30 },
+  });
+  const today = ledger.today();
+  assert.equal(today.tokens, 5150);
+  assert.equal(today.billed, 150);
+  assert.equal(ledger.month().billed, 150);
+  assert.equal(ledger.lifetime().billed, 150);
+  await ledger.flush();
+});
+
+test('every usage row can be reported in one consistent unit', async () => {
+  // The card binds ONE unit to today, this month and the lifetime row at once.
+  // This reproduces that choice over real ledger buckets, because the bug it
+  // guards against — one row in each unit — came from exactly this seam.
+  const dir = await mkdtemp(join(tmpdir(), 'quota-card-'));
+  const at = bj(2026, 9, 30, 10, 0);
+  const ledger = createLedger({ config: CONFIG, filePath: join(dir, 'usage.json'), now: () => at });
+  ledger.record({
+    at,
+    model: 'deepseek-flash',
+    usage: { inputTokens: 1000, cacheReadTokens: 900_000, cacheWriteTokens: 500, outputTokens: 2000 },
+  });
+
+  const pick = (bucket, total) => (total ? bucket.tokens : bucket.billed);
+  const today = ledger.today();
+  const month = ledger.month();
+  const life = ledger.lifetime();
+
+  // Billed unit: all three rows agree, and none of them is the cache-inflated one.
+  assert.deepEqual([pick(today, false), pick(month, false), pick(life, false)], [3500, 3500, 3500]);
+  // Total unit: all three agree again, and all three now include the cache reads.
+  assert.deepEqual([pick(today, true), pick(month, true), pick(life, true)], [903_500, 903_500, 903_500]);
+  // The account-history bucket answers to the same switch.
+  const platform = { tokens: 4_261_067_012, billed: 250_000_000 };
+  assert.equal(pick(platform, true), 4_261_067_012);
+  assert.equal(pick(platform, false), 250_000_000);
+  await ledger.flush();
 });
 
 // ── ledger ordering ───────────────────────────────────────────────────────────

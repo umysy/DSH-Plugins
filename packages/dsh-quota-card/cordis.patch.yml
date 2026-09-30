@@ -42,6 +42,14 @@
         # Show the estimated-spend row (computed from the price table below).
         # Click the card's gear to override this for the browser session.
         showCost: false
+        # Usage unit. false = BILLED tokens (uncached input + cache write +
+        # output), the figure that moves with the money. true = every token the
+        # context handled, cache reads included. One unit is used for today, this
+        # month and the account total, so the rows stay comparable; the card's
+        # `¥ / Σ` button overrides this for the browser session.
+        # Cache reads are ~98% of the raw total but are billed at ~2% of a cache
+        # miss, which is why the two figures differ by orders of magnitude.
+        showTotalTokens: false
         # Optional small print under the peak/off-peak block; "" hides the line.
         note: 空闲价格为高峰价格的一半
 
@@ -51,7 +59,7 @@
         # the DEEPSEEK_API_KEY environment variable. These two fields are just
         # the identity sent along with the account query.
         locale: zh_CN
-        clientVersion: dsh-quota-card/0.3.0
+        clientVersion: dsh-quota-card/0.3.1
 
         # ── account history (the console's PRIVATE usage API) ─────────────────
         # false = the card's "total spend / total tokens" rows count from the day

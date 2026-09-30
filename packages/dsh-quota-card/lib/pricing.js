@@ -72,6 +72,20 @@ export function billedInput(totals) {
   return (totals.inputTokens || 0) + (totals.cacheReadTokens || 0) + (totals.cacheWriteTokens || 0);
 }
 
+/**
+ * Billed tokens = every token the request is charged for: uncached input, cache
+ * write, and output. Cache READS are excluded because they are billed at roughly
+ * a fiftieth of a cache miss, so including them would produce a token count that
+ * barely moves with the money.
+ *
+ * This is the counterpart of the console's `billed` figure, so a local bucket and
+ * an account-history bucket are directly comparable.
+ */
+export function billedTokens(totals) {
+  if (totals === null || totals === undefined) return 0;
+  return (totals.inputTokens || 0) + (totals.cacheWriteTokens || 0) + (totals.outputTokens || 0);
+}
+
 /** Cache-hit rate in `[0, 1]`; `null` when no input was measured (never 0/0). */
 export function cacheHitRate(totals) {
   const input = billedInput(totals);

@@ -42,7 +42,7 @@ DeepSeek Harness（DSH）侧边栏左下角的一张常驻卡片：**余额 / �
 dsh plugin --profile web add "github:umysy/DSH-Plugins"
 
 # dsh web：固定版本
-dsh plugin --profile web add "github:umysy/DSH-Plugins#v0.2.0"
+dsh plugin --profile web add "github:umysy/DSH-Plugins#v0.3.1"
 ```
 
 装完**重启 Harness**（插件发现按进程缓存），刷新页面。可用版本见 [Releases](https://github.com/umysy/DSH-Plugins/releases)。
@@ -86,11 +86,12 @@ dsh plugin --profile web remove dsh-quota-card
 | `makeupWorkdays` | 省略 → 用内置表 | 调休上班的周末，语义与 `holidays` 相同 |
 | `countMakeupAsPeak` | `false` | 调休上班日是否按高峰计。官方文字未提及调休，故默认**不算**高峰；若你观察到账单按高峰计费，改成 `true` |
 | `showCost` | `false` | 是否默认显示估算费用行（卡片上的 ⚙ 可在浏览器本地覆盖） |
+| `showTotalTokens` | `false` | 用量口径：`false` = **计费 token**（不含缓存读取）；`true` = token 总量（含缓存读取）。卡片上的 `¥/Σ` 按钮可在浏览器本地覆盖，见「用量口径」一节 |
 | `note` | `空闲价格为高峰价格的一半` | 卡片底部小字；设为 `""` 可隐藏 |
 | `prices` | `deepseek-flash` / `deepseek-v4-pro` | 高峰价（**CNY / 百万 token**），仅用于费用估算 |
 | `balancePollMs` | `60000` | 余额最短刷新间隔（Host 侧缓存，避免频繁打接口） |
 | `locale` | `zh_CN` | 随账号余额查询一起发送的身份信息，仅用于标记请求 |
-| `clientVersion` | `dsh-quota-card/0.1.0` | 同上 |
+| `clientVersion` | `dsh-quota-card/0.3.1` | 同上 |
 | `platformHistory` | `false` | 是否读取**开放平台账号历史**（累计消费 / 累计用量）。开启需要控制台 token，见下节 |
 | `platformTokenRef` | `DEEPSEEK_USER_TOKEN` | 控制台 token 的凭据名（环境变量 / DSH 凭据存储都按这个名字解析） |
 | `platformHistoryMonths` | `48` | 最多回溯多少个月（上限 120）；连续 3 个零消费月会提前停止 |
@@ -124,25 +125,39 @@ GET https://platform.deepseek.com/api/v0/usage/amount?month=M&year=Y    → 该�
 1. 浏览器登录 `https://platform.deepseek.com/usage`
 2. **F12 → Network**，筛选 `api/v0`，刷新页面
 3. 点任意一条 `usage/…` 请求 → **Headers → Request Headers**，复制 **`Authorization`** 的值（形如 `Bearer Y2w1…`）
-4. 让 Harness 保存它（token 只进本机 Host，不进浏览器存储、不进日志）：
+4. 让 Harness 保存它。**推荐走文件**：把值（可含 `Bearer ` 前缀，脚本会自动剥掉）写进一个临时文件，终端完全不参与，因此不受任何粘贴行为影响：
 
    ```powershell
-   $env:DEEPSEEK_USER_TOKEN="Bearer Y2w1…"; node "F:\DSH Plugins\packages\dsh-quota-card\tools\set-platform-token.mjs"
+   # 用记事本写：notepad .token.tmp   —— 粘贴要保存的值，保存后关闭
+   node "F:\DSH Plugins\packages\dsh-quota-card\tools\set-platform-token.mjs" --from-file "F:\DSH Plugins\.token.tmp"
+   Remove-Item -LiteralPath "F:\DSH Plugins\.token.tmp" -Force
    ```
 
+   期望输出 `stored : Y2w1Y5****prVh`（6 位前缀 + `****` + 4 位后缀）。`.token*` 已在 `.gitignore` 里，不会被误提交。
+
+   另两种入口：
+
    ```powershell
+   # 静默提示（终端会把粘贴交给程序时可用；写库前会校验长度与字符集）
+   node "F:\DSH Plugins\packages\dsh-quota-card\tools\set-platform-token.mjs" --prompt
+
+   # 环境变量（脚本化场景）
+   $env:DEEPSEEK_USER_TOKEN = 'Bearer …'
+   node "F:\DSH Plugins\packages\dsh-quota-card\tools\set-platform-token.mjs"
    Remove-Item Env:\DEEPSEEK_USER_TOKEN -ErrorAction SilentlyContinue
    ```
 
-   也可以直接在 Harness 页面的控制台里 POST（结果输出版本号与遮蔽片段）：
+   或者直接在 Harness 页面控制台里 POST（只回显遮蔽片段）：
 
    ```js
    await (await fetch('/quota-card/token', {
      method: 'POST',
      headers: { 'Content-Type': 'application/json' },
-     body: JSON.stringify({ token: 'Bearer Y2w1…' }),
+     body: JSON.stringify({ token: 'Bearer …' }),
    })).json()
    ```
+
+   > **不要用 `Read-Host -AsSecureString`**：PowerShell 在 SecureString 提示里会把**粘贴的多字符内容截成 1 个字符**；部分终端还会把粘贴送给 shell 提示符而不是程序（表现为 `Bearer : The term ... is not recognized`）。这两种情况都会静默存进一个无效 token，之后所有扫描都以 `auth-failed` 结束，看起来像"token 过期"。细节见文末[排障笔记](#排障笔记这个接口真实存在的九个坑)第 8、9 条。
 
 5. 在插件 `cordis.patch.yml` 里把 `platformHistory` 改成 `true`，重启 Harness
 6. 用 `--check-only` 确认扫描状态：
@@ -166,6 +181,24 @@ GET https://platform.deepseek.com/api/v0/usage/amount?month=M&year=Y    → 该�
 
 卡片底部有一条细手柄：**上下拖动**调整卡片高度（90–680px），松手后大小存在浏览器本地、刷新后保持；**双击手柄**恢复「自适应内容高度」。高度不足时卡片内部自动出现滚动条，不会把行挤掉。自适应模式下卡片还会自动避开窗口底部，不会长到被侧边栏裁掉。
 
+### 用量口径 —— 计费 token 还是 token 总量
+
+缓存命中率高的账户里，**缓存读取会占 token 总数的 98% 以上**，而它只按 cache-miss 的约 2% 计价。所以「token 总量」和「花了多少钱」几乎是两个独立的量：同一个账户可能显示「4.34B tokens / ¥297」，按总量看贵得离谱，按计费量看只有约 6360 万。
+
+卡片因此提供**两种口径，且三行（今日 / 本月 / 累计）永远用同一种**，避免并排的数字互相不可比：
+
+| 口径 | 含义 | 适合看什么 |
+| --- | --- | --- |
+| **计费 token**（`¥`，默认） | `未命中缓存 + 缓存写入 + 输出`，即真正按 token 计费的部分 | 「花了多少钱、烧了多少计费量」 |
+| **token 总量**（`Σ`） | `计费 + 缓存读取`，即上下文实际处理过的量 | 「对话有多长、上下文规模」 |
+
+切换方式：
+
+- 卡片标题栏的 **`¥ / Σ`** 按钮（写入浏览器本地，刷新后保持）
+- 或默认值 `showTotalTokens: false | true`
+
+`缓存命中` 那一行与口径无关，始终是 `cacheRead ÷ (未命中 + 缓存读取 + 缓存写入)`。
+
 ### 今日 / 本月用量、缓存命中 —— 本地账本
 
 今日与本月这两个数字**始终**来自 DSH 自己的链路：Host 侧挂 `llm/stream` waterfall，读每次模型调用 provider 实报的 `usage`。这是刻意选择 —— 它零凭据、零私有接口、每笔调用都精确。
@@ -175,8 +208,8 @@ GET https://platform.deepseek.com/api/v0/usage/amount?month=M&year=Y    → 该�
 - 按**北京时间**自然日落桶，`今日` = 当日桶，`本月` = 当月所有桶之和
 
 **口径**
-- 「用量」= `input + cacheRead + cacheWrite + output`（含缓存读，因为它在真实上下文里被处理过）
 - 「缓存命中」= `cacheRead ÷ (input + cacheRead + cacheWrite)`
+- 「用量」按上面的**用量口径**取计费量或总量
 - 会话标题、压缩等辅助调用的 `purpose` 会**单独打标**存进 `days[date].byPurpose`，便于排查；但**仍然计入**今日/本月总量（它们确实花了 token）。如果你希望只统计对话用量，可以基于该字段扩展。
 
 **已知边界**
@@ -268,6 +301,113 @@ await (await fetch('/quota-card/snapshot', { cache: 'no-store' })).json()
 3. 费用行是**估算**：按每笔请求发生时的档位计价，价目表需随官方调价更新（2026-08、2026-09 各调过一次）；模型名以最长前缀匹配价目表，未精确命中时该行带 `*` 标记。官方账单以控制台为准。
 4. 法定节假日表需要每年 11 月更新一次。
 5. 卡片仅在侧边栏展开时显示；窄条状态不显示任何数字。
+
+---
+
+## 排障笔记：这个接口真实存在的九个坑
+
+以下每一条都是在本插件开发过程中**实际踩到并修掉**的，症状与根因都保留了第一手记录。它们不是假想风险 —— 如果你要自己改这个插件、或写另一个接同样接口的插件，这几条能省掉大量时间。
+
+### 1. 控制台接口不认 API Key，也不认 DSH 账号凭据
+
+**症状**：`GET /api/v0/usage/cost` 返回 HTTP 200 + `{"code":40003,"msg":"Authorization Failed (invalid token)"}`。
+
+**根因**：该接口要的是**网页登录态 token**（`platform.deepseek.com` 页面发出的 `Authorization: Bearer …`），与推理 API Key、与 DSH 凭据库里 `deepseek-account-platform/default` 的 grant 都是不同签发方。两种写法（`Bearer xxx` 与裸 `Authorization: xxx`）都试过，都被拒。
+
+**做法**：只认页面实际使用的那种 token；插件把它存进 DSH 凭据服务，键名 `DEEPSEEK_USER_TOKEN`。
+
+### 2. 缺浏览器形态的请求头也会被拒
+
+**症状**：即使 token 正确，仍返回 40003 或空响应。
+
+**根因**：控制台请求带着 `User-Agent`（Chrome）与 `Referer: https://platform.deepseek.com/usage`，接口会校验。
+
+**做法**：`platformRequestHeaders()` 始终带上这两项。
+
+### 3. 两个端点的 `biz_data` 形状不同
+
+**症状**：token 统计正确，消费恒为 0。
+
+**根因**：实测
+
+```
+usage/cost   → data.biz_data 是【数组】: [{ total, days, currency }]
+usage/amount → data.biz_data 是【对象】: { total, days }
+```
+
+只按其中一种解析，另一个必然静默归零。
+
+**做法**：`costRecord()` 同时兼容数组与对象。
+
+### 4. `billed` 必须用加法算，不能用减法
+
+**症状**：计费 token 与金额严重不成比例。
+
+**根因**：`billed = tokens − cacheHits` 这种减法**默认「缓存读取占大头」**。但控制台里还报了一个 `PROMPT_TOKEN` 桶（实测 1.44 亿），减法会把它一起算进计费量。
+
+**做法**：改为**按类型累加**（跳过 `PROMPT_CACHE_HIT_TOKEN`），不依赖任何"占比假设"。
+
+### 5. 缓存读取占总量 98%，但只按 2% 计价 → 必须区分口径
+
+**症状**：卡片显示「4.34B tokens / ¥296」，按总量看贵得离谱。
+
+**根因**：缓存读取（`PROMPT_CACHE_HIT_TOKEN`）占了 token 总数的约 98%，而它只按 cache-miss 的约 2% 计价。官方口径里没计费含混 —— 输入只分**命中**与**未命中**两类。
+
+**做法**：卡片提供两种口径（`¥` 计费 / `Σ` 总量），且**今日/本月/累计三行永远同口径**，避免并排数字互不可比。
+
+### 6. 缓存 schema 演进：旧 payload 必须拒收重扫
+
+**症状**：新版本上线后，「累计用量」显示原始总和（4.26B）而不是计费量，且 `scans: 0`。
+
+**根因**：落盘的 `platform.json` 是**旧版本**写的，缺 `billed`/`cacheHits` 字段；`seed()` 原样读回，新客户端拿不到 `billed` 就退回显示 `tokens`。而且缓存"新鲜"（TTL 内）导致根本不会重扫。
+
+**做法**：`historyPayloadComplete()` 校验必需字段，不合格就**拒收**并让下次刷新重扫；计数 `refusedSeed` 记录拒了几次，避免静默。
+
+### 7. 凭据文件是分层块结构，`payload:` 不能当记录头
+
+**症状**：解析 `.credentials.yaml` 取平台 token 时，token 行明明存在（64 字符）却返回 `null`。
+
+**根因**：原实现按「缩进是否回到基级」判断记录边界：
+
+```yaml
+records:
+  deepseek-account-platform/default:   # 记录头（缩进 2）
+    kind: grant                        # 缩进 4
+    payload:                           # ← 缩进 4，被误判为新记录头
+      token: <64 字符>                  # 于是这一行被跳过
+```
+
+**做法**：改为**按缩进栈追踪完整路径**，只在 `records → deepseek-account-platform/* → payload → token` 这条路径上取值 —— 这也顺带保证 `refs:` 里的 API Key 永远不会被误取。
+
+### 8. `Read-Host -AsSecureString` 会把粘贴截成 1 个字符
+
+**症状**：输入后 `captured length = 1`；若没校验，就会**静默存进一个无效 token**，之后所有扫描都以 `auth-failed` 结束，看起来像"token 过期"。
+
+**根因**：PowerShell 在 SecureString 提示里把粘贴的多字符内容当成单个安全字符处理。
+
+**做法**：不要用它。插件提供 `--from-file`（最可靠，终端完全不参与）与环境变量两种入口，并在写入前校验长度 ≥16、无空白。
+
+### 9. 有些终端会把粘贴送给 shell 而不是程序
+
+**症状**：运行 `--prompt` 后，`Bearer Y2w1…` 出现在 PowerShell 提示符上并报 `The term 'Bearer' is not recognized`，程序只收到 1 个字符。
+
+**根因**：该终端的粘贴事件没有进入程序的标准输入，而是被 shell 抢先解释。
+
+**做法**：`--from-file <path>` —— 把值写进文件再让脚本读，完全绕开终端输入系统；脚本读完后会提示你立即删除该文件。
+
+### 附：诊断入口
+
+装好之后，这两个命令能回答绝大多数"数字不对"的问题：
+
+```powershell
+# 扫描状态：凭据是否就位、扫了几个月、失败原因、两种口径的合计
+node tools/set-platform-token.mjs --check-only
+
+# 接口实测：结构大纲 + 本包解析结果 + 逐月消费轮廓（从不打印凭据）
+node tools/probe-platform-usage.mjs --year 2026 --month 9 --scan 6
+```
+
+`/quota-card/health` 的 `platform.history` 里有 `scans` / `failures` / `requestFailures` / `lastError` / `lastFailure` / `refusedSeed`，以及 `billedTokens` 与 `rawTokens`。
 
 ## License
 

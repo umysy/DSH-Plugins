@@ -19,6 +19,7 @@ import { join } from 'node:path';
 
 import {
   addTotals,
+  billedTokens,
   cacheHitRate,
   emptyTotals,
   estimateCost,
@@ -335,6 +336,9 @@ export function createLedger(options) {
     const cost = estimateCost(entries, config);
     return {
       tokens: totalTokens(totals),
+      // The billing counterpart: every token except the cache reads. It is what
+      // makes a local bucket comparable with the console's own billed figure.
+      billed: billedTokens(totals),
       totals,
       peak: totalTokens(perTier.peak),
       offPeak: totalTokens(perTier.offPeak),

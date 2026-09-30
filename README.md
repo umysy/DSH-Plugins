@@ -7,7 +7,7 @@
 
 | 插件 | 作用 | 平台 |
 | --- | --- | --- |
-| [`dsh-quota-card`](packages/dsh-quota-card/) | 侧边栏左下角常驻卡片：余额 / 今日用量 / 本月用量 / 缓存命中 / 峰谷时段与价格倍率，高度可拖拽 | Web（桌面端 / `dsh web`） |
+| [`dsh-quota-card`](packages/dsh-quota-card/) | 侧边栏左下角常驻卡片：余额 / 今日用量 / 本月用量 / 缓存命中 / 峰谷时段与价格倍率，可选读取开放平台账号历史（累计消费 / 累计用量），高度可拖拽 | Web（桌面端 / `dsh web`） |
 
 ---
 
@@ -22,12 +22,12 @@
 dsh plugin --profile web add "github:umysy/DSH-Plugins"
 
 # 固定版本（推荐给正式使用）
-dsh plugin --profile web add "github:umysy/DSH-Plugins#v0.2.0"
+dsh plugin --profile web add "github:umysy/DSH-Plugins#v0.3.1"
 ```
 
 装完**重启 Harness**（插件发现按进程缓存），刷新页面即可。
 
-> 固定版本的 tag 见 [Releases](https://github.com/umysy/DSH-Plugins/releases)。当前只有 `v0.2.0` 一个 tag，需要等待发布对应的 tag 才能用 `#<tag>` 形式。
+> 固定版本的 tag 见 [Releases](https://github.com/umysy/DSH-Plugins/releases)。`v0.2.0`、`v0.3.0`、`v0.3.1` 均可用于 `#<tag>` 形式。
 
 ### 方式二：桌面端 App
 

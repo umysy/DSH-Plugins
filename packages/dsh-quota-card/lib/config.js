@@ -47,13 +47,19 @@ export const DEFAULTS = {
   // their shape.
   countMakeupAsPeak: false,
   showCost: false,
+  // false = report BILLED tokens (everything except the cache-hit reads), the
+  // figure that moves with the money. true = report every token the context
+  // handled, cache reads included, the figure that grows with conversation
+  // length. One unit is used for today, this month and the account total alike,
+  // so the three rows stay comparable; the card's gear overrides it locally.
+  showTotalTokens: false,
   note: '空闲价格为高峰价格的一半',
   prices: DEFAULT_PRICES,
   balancePollMs: 60000,
   // Sent to the official account seam when it supplies the balance. Purely
   // informational; the seam uses it to tag the request, not to authorize it.
   locale: 'zh_CN',
-  clientVersion: 'dsh-quota-card/0.3.0',
+  clientVersion: 'dsh-quota-card/0.3.1',
   // ── account history (the console's private usage API) ─────────────────────
   // Off by default: it needs the console session token (the `userToken` in
   // platform.deepseek.com's localStorage) and it reads an UNDOCUMENTED endpoint.
@@ -244,6 +250,7 @@ export function normalizeConfig(raw, defaultYear) {
     makeupWorkdays: normalizeDateField(undefined, year, MAKEUP_WORKDAYS),
     countMakeupAsPeak: DEFAULTS.countMakeupAsPeak,
     showCost: DEFAULTS.showCost,
+    showTotalTokens: DEFAULTS.showTotalTokens,
     note: DEFAULTS.note,
     prices: DEFAULTS.prices,
     balancePollMs: DEFAULTS.balancePollMs,
@@ -264,6 +271,7 @@ export function normalizeConfig(raw, defaultYear) {
   if (raw.countMakeupAsPeak !== undefined) config.countMakeupAsPeak = raw.countMakeupAsPeak === true;
   if (raw.prices !== undefined) config.prices = normalizePrices(raw.prices);
   if (raw.showCost !== undefined) config.showCost = raw.showCost === true;
+  if (raw.showTotalTokens !== undefined) config.showTotalTokens = raw.showTotalTokens === true;
   if (raw.note !== undefined) config.note = typeof raw.note === 'string' ? raw.note : '';
   if (raw.balancePollMs !== undefined) config.balancePollMs = positiveInt(raw.balancePollMs, DEFAULTS.balancePollMs);
   if (typeof raw.locale === 'string' && raw.locale.trim() !== '') config.locale = raw.locale.trim();
@@ -299,6 +307,7 @@ export function toPublicConfig(config, year) {
     makeupWorkdays: (config.makeupWorkdays[String(year)] ?? []).slice(),
     countMakeupAsPeak: config.countMakeupAsPeak,
     showCost: config.showCost,
+    showTotalTokens: config.showTotalTokens,
     note: config.note,
   };
 }
