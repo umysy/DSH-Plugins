@@ -1,0 +1,16 @@
+# Keep one line ending in the repository regardless of the contributor's OS,
+# so a Windows commit does not rewrite every line of a Linux-touched file.
+* text=auto eol=lf
+
+# Binary assets are never normalized.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+
+# GitHub reads these as-is.
+.github/workflows/*.yml text eol=lf

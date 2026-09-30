@@ -1,0 +1,65 @@
+# dsh-quota-card — bundle defaults.
+#
+# This file is this package's own patch layer. `dsh plugin add` mounts it
+# automatically (package.json -> dsh.bundle.patch), so the profile's
+# cordis.patch.yml does NOT need a manual row.
+#
+# Every value here is the "base layer": the plugin reads it as `config` in
+# apply(ctx, config). Editing this file while the Harness runs is picked up by
+# the patch-layer HMR — no restart needed. Invalid values are ignored
+# field-by-field and replaced by the built-in defaults (lib/config.js).
+#
+# Unit for costs below: CNY per 1,000,000 tokens.
+- insert:
+    - id: quota-card
+      name: dsh-quota-card
+      config:
+        # ── peak / off-peak ───────────────────────────────────────────────────
+        # Official rule (https://api-docs.deepseek.com/quick_start/pricing):
+        #   "Off-peak rates are half of the peak rates. Peak hours are
+        #    01:00 - 04:00 and 06:00 - 10:00 UTC, Monday through Friday,
+        #    excluding Chinese public holidays. All other hours are off-peak,
+        #    including weekends and Chinese public holidays in full."
+        # 01:00-04:00 + 06:00-10:00 UTC == 09:00-12:00 + 14:00-18:00 in Beijing.
+        timezone: Asia/Shanghai
+        peakWindows:
+          - ["09:00", "12:00"]
+          - ["14:00", "18:00"]
+        peakDays: [1, 2, 3, 4, 5] # 1 = Monday ... 7 = Sunday (ISO)
+        peakMultiplier: 2 # off-peak = peak / 2.  2 => "空闲价格为高峰价格的一半"
+        # Chinese statutory holidays are off-peak all day. LEAVE THIS KEY OUT to
+        # use the table embedded in lib/holidays.js (2026, from the State Council
+        # notice). Set a non-empty map to override it, or an empty map to clear
+        # it — a cleared table degrades the rule to "weekdays only" and the card
+        # shows "节假日表：未知". Dates are `MM-DD` (bare) or `YYYY-MM-DD`.
+        # Accepts either shape:
+        #   holidays: { "2026": ["01-01"] }
+        #   holidays: { 春节: ["02-17"] }
+        # makeupWorkdays: { "2026": ["09-20"] }
+        # countMakeupAsPeak: false
+
+        # ── display ───────────────────────────────────────────────────────────
+        # Show the estimated-spend row (computed from the price table below).
+        # Click the card's gear to override this for the browser session.
+        showCost: false
+        # Optional small print under the peak/off-peak block; "" hides the line.
+        note: 空闲价格为高峰价格的一半
+
+        # ── balance source ────────────────────────────────────────────────────
+        # The balance is read from the SIGNED-IN DSH account first (no setup
+        # needed); only when that is unavailable does the plugin fall back to
+        # the DEEPSEEK_API_KEY environment variable. These two fields are just
+        # the identity sent along with the account query.
+        locale: zh_CN
+        clientVersion: dsh-quota-card/0.1.0
+
+        # ── price table (used only for the estimate; official billing wins) ───
+        prices:
+          deepseek-flash:
+            cacheHit: 0.04
+            cacheMiss: 2
+            output: 8
+          deepseek-v4-pro:
+            cacheHit: 0.3
+            cacheMiss: 9
+            output: 27

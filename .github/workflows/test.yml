@@ -1,0 +1,31 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# The packages in this repo are plain JavaScript with no build step and no
+# dependencies, so CI is just Node's own test runner plus a syntax check.
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Syntax check
+        run: |
+          node --check packages/dsh-quota-card/lib/index.js
+          node --check packages/dsh-quota-card/lib/client.js
+      - name: Host half imports cleanly (no third-party imports)
+        run: node --input-type=module -e "import('./packages/dsh-quota-card/lib/index.js').then(m => { if (typeof m.apply !== 'function') throw new Error('missing apply'); console.log('ok', m.name); })"
+      - name: Logic tests
+        run: node --test packages/dsh-quota-card/test/logic.test.mjs

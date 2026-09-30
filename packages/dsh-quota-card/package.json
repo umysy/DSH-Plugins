@@ -1,0 +1,92 @@
+{
+  "name": "dsh-quota-card",
+  "version": "0.2.0",
+  "private": true,
+  "description": "DeepSeek Harness bundle plugin: a sidebar-footer card showing the account balance, today's and this month's token usage, the cache-hit rate, and the DeepSeek peak/off-peak pricing window (off-peak = half of peak).",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.1.7-rc.2"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/logic.test.mjs",
+    "check": "node --check lib/index.js && node --check lib/client.js"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "client-plugin",
+    "sidebar",
+    "quota-card",
+    "balance",
+    "usage",
+    "peak-off-peak",
+    "web-ui"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/umysy/DSH-Plugins.git",
+    "directory": "packages/dsh-quota-card"
+  },
+  "homepage": "https://github.com/umysy/DSH-Plugins/tree/main/packages/dsh-quota-card#readme",
+  "bugs": {
+    "url": "https://github.com/umysy/DSH-Plugins/issues"
+  },
+  "author": "umysy",
+  "license": "MIT",
+  "dshhub": {
+    "schemaVersion": 1,
+    "displayName": "dsh-quota-card",
+    "summary": "侧边栏左下角卡片：余额 / 今日用量 / 本月用量 / 缓存命中 / 峰谷时段与价格倍率。",
+    "categories": [
+      "Web UI",
+      "Usage"
+    ],
+    "surfaces": [
+      "web"
+    ],
+    "capabilities": {
+      "provides": []
+    },
+    "compatibility": {
+      "dsh": ">=0.1.7-rc.2"
+    },
+    "permissions": {
+      "network": [
+        "https://api.deepseek.com/user/balance"
+      ]
+    }
+  }
+}

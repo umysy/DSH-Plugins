@@ -1,0 +1,16 @@
+# Dependencies and build output
+node_modules/
+
+# Harness runtime state that must never be committed
+usage.json
+*.tmp
+*.log
+
+# Local notes / scratch files that are not part of the published plugins
+usage-panel-research.md
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
