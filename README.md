@@ -1,6 +1,7 @@
 # DSH Plugins
 
 [![test](https://github.com/umysy/DSH-Plugins/actions/workflows/test.yml/badge.svg)](https://github.com/umysy/DSH-Plugins/actions/workflows/test.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）插件集合。
 
@@ -17,10 +18,16 @@
 ### 方式一：命令行（`dsh web`）
 
 ```bash
+# 跟随 main（总拿最新）
 dsh plugin --profile web add "github:umysy/DSH-Plugins"
+
+# 固定版本（推荐给正式使用）
+dsh plugin --profile web add "github:umysy/DSH-Plugins#v0.2.0"
 ```
 
 装完**重启 Harness**（插件发现按进程缓存），刷新页面即可。
+
+> 固定版本的 tag 见 [Releases](https://github.com/umysy/DSH-Plugins/releases)。当前只有 `v0.2.0` 一个 tag，需要等待发布对应的 tag 才能用 `#<tag>` 形式。
 
 ### 方式二：桌面端 App
 

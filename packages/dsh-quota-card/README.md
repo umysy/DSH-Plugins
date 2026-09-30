@@ -1,6 +1,7 @@
 # dsh-quota-card
 
 [![test](https://github.com/umysy/DSH-Plugins/actions/workflows/test.yml/badge.svg)](https://github.com/umysy/DSH-Plugins/actions/workflows/test.yml)
+[![release](https://img.shields.io/github/v/release/umysy/DSH-Plugins?label=release)](https://github.com/umysy/DSH-Plugins/releases)
 
 DeepSeek Harness（DSH）侧边栏左下角的一张常驻卡片：**余额 / 今日用量 / 本月用量 / 缓存命中 / 峰谷时段与价格倍率**。
 
@@ -37,11 +38,14 @@ DeepSeek Harness（DSH）侧边栏左下角的一张常驻卡片：**余额 / �
 ### 从 GitHub 安装（推荐）
 
 ```bash
-# dsh web
+# dsh web：跟随 main
 dsh plugin --profile web add "github:umysy/DSH-Plugins"
 
-# 装完重启 Harness（插件发现按进程缓存），刷新页面
+# dsh web：固定版本
+dsh plugin --profile web add "github:umysy/DSH-Plugins#v0.2.0"
 ```
+
+装完**重启 Harness**（插件发现按进程缓存），刷新页面。可用版本见 [Releases](https://github.com/umysy/DSH-Plugins/releases)。
 
 桌面端 App 独占 `desktop` profile，命令行会被拒绝，改用 App 内的 `设置 → 插件 → 添加插件`，source 填 `github:umysy/DSH-Plugins`。
 
