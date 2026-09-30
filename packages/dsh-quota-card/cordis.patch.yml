@@ -59,7 +59,7 @@
         # the DEEPSEEK_API_KEY environment variable. These two fields are just
         # the identity sent along with the account query.
         locale: zh_CN
-        clientVersion: dsh-quota-card/0.3.1
+        clientVersion: dsh-quota-card/0.3.2
 
         # ── account history (the console's PRIVATE usage API) ─────────────────
         # false = the card's "total spend / total tokens" rows count from the day

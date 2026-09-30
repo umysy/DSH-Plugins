@@ -59,7 +59,7 @@ export const DEFAULTS = {
   // Sent to the official account seam when it supplies the balance. Purely
   // informational; the seam uses it to tag the request, not to authorize it.
   locale: 'zh_CN',
-  clientVersion: 'dsh-quota-card/0.3.1',
+  clientVersion: 'dsh-quota-card/0.3.2',
   // ── account history (the console's private usage API) ─────────────────────
   // Off by default: it needs the console session token (the `userToken` in
   // platform.deepseek.com's localStorage) and it reads an UNDOCUMENTED endpoint.

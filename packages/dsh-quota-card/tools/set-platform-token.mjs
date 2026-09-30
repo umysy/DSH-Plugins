@@ -82,6 +82,9 @@ async function main() {
     const body = await response.json();
     console.log('health ok        :', body.ok === true);
     console.log('credentials      :', body.platform?.credentials);
+    // Masked fingerprint of the stored credential: proves WHICH token is in use
+    // without revealing it. A rotation is confirmed when this changes.
+    console.log('stored token     :', body.platform?.token ?? '(unavailable)');
     console.log('history enabled  :', body.config?.platformHistory);
     console.log('history state    :', JSON.stringify(body.platform?.history ?? {}));
     return;

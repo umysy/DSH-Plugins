@@ -1,6 +1,6 @@
 {
   "name": "dsh-quota-card",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "description": "DeepSeek Harness bundle plugin: a sidebar-footer card showing the account balance, today's and this month's token usage, the cache-hit rate, and the DeepSeek peak/off-peak pricing window (off-peak = half of peak).",
   "type": "module",

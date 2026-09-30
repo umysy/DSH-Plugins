@@ -408,19 +408,23 @@ export function historyPayloadComplete(payload) {
  *
  * @param {object} options
  * @param {() => Promise<string|null>} options.resolveToken
- * @param {(url: string) => Promise<unknown|null>} options.request
  * @param {number} options.months how far back to scan.
  * @param {number} options.ttlMs how long a scan stays fresh.
  * @param {() => number} [options.now]
  * @param {(message: string, error?: unknown) => void} [options.onError]
+ * @param {typeof fetch} [options.fetchImpl] injected transport, for tests.
  */
 export function createPlatformHistory(options) {
   const ttlMs = Number.isFinite(options.ttlMs) && options.ttlMs > 0 ? options.ttlMs : 10 * 60_000;
   const now = typeof options.now === 'function' ? options.now : () => Date.now();
   const onError = typeof options.onError === 'function' ? options.onError : () => {};
+  // Injected so a test can exercise the scan path without reaching the network.
+  const fetchImpl = typeof options.fetchImpl === 'function' ? options.fetchImpl : fetch;
 
   /** @type {{payload: object, at: number}|null} */
   let cache = null;
+  /** Set by `invalidate()`: the numbers stand, but a rescan is due. */
+  let stale = false;
   let inflight = null;
   const counters = {
     scans: 0,
@@ -428,6 +432,7 @@ export function createPlatformHistory(options) {
     monthsFetched: 0,
     requestFailures: 0,
     refusedSeed: 0,
+    invalidations: 0,
     lastError: '',
     lastFailure: null,
     tokenMissing: 0,
@@ -435,7 +440,12 @@ export function createPlatformHistory(options) {
 
   function snapshotPayload() {
     if (cache === null) return null;
-    return { ...cache.payload, cachedAt: cache.at, fresh: now() - cache.at < ttlMs };
+    return {
+      ...cache.payload,
+      cachedAt: cache.at,
+      fresh: !stale && now() - cache.at < ttlMs,
+      stale,
+    };
   }
 
   async function runScan(reason) {
@@ -451,7 +461,7 @@ export function createPlatformHistory(options) {
       let httpError = '';
       const headers = platformRequestHeaders(token, PLATFORM_USER_AGENT, PLATFORM_REFERER);
       const request = async (url) => {
-        const response = await fetch(url, { headers, redirect: 'manual', signal: AbortSignal.timeout(15_000) });
+        const response = await fetchImpl(url, { headers, redirect: 'manual', signal: AbortSignal.timeout(15_000) });
         const text = await response.text();
         let json = null;
         try {
@@ -503,6 +513,7 @@ export function createPlatformHistory(options) {
         reason: reason ?? 'scheduled',
       };
       cache = { payload, at: now() };
+      stale = false;
       if (counters.lastError.startsWith('no-')) counters.lastError = '';
       return payload;
     } catch (error) {
@@ -516,10 +527,15 @@ export function createPlatformHistory(options) {
   return {
     /** The cached payload, or null when nothing usable has been scanned. */
     current: snapshotPayload,
-    /** Scan if stale; concurrent callers share one scan. Never rejects. */
+    /**
+     * Scan when due; concurrent callers share one scan. Never rejects.
+     *
+     * An inflight scan is returned as-is, so a caller that arrives during a
+     * credential change cannot start a second scan with the old token.
+     */
     refresh(reason) {
       if (inflight !== null) return inflight;
-      if (cache !== null && now() - cache.at < ttlMs) return Promise.resolve(snapshotPayload());
+      if (!stale && cache !== null && now() - cache.at < ttlMs) return Promise.resolve(snapshotPayload());
       inflight = runScan(reason).finally(() => {
         inflight = null;
       });
@@ -536,16 +552,27 @@ export function createPlatformHistory(options) {
         return false;
       }
       cache = { payload, at: payload.scannedAt };
+      stale = false;
       return true;
     },
-    /** Drop the cache so the next `refresh` scans again (a new credential). */
+    /**
+     * A credential changed: keep serving the last good numbers (they are still
+     * the best available, and a rescan may not reproduce an older month) but mark
+     * them stale so the next `refresh` scans. Deliberately does NOT scan here —
+     * scanning in the same tick as the credential write raced the write and
+     * produced a bogus auth failure.
+     */
     invalidate() {
-      cache = null;
+      if (cache !== null) {
+        stale = true;
+        counters.invalidations += 1;
+      }
     },
     diagnostics() {
       return {
         ...counters,
         cached: cache !== null,
+        stale,
         cachedAt: cache === null ? null : cache.at,
         months: cache === null ? 0 : (cache.payload.months ?? 0),
         billedTokens: cache === null ? 0 : (cache.payload.billed ?? 0),

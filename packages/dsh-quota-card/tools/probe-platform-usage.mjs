@@ -90,6 +90,52 @@ async function readCredentials() {
   }
 }
 
+/** The persisted history the plugin writes; its presence proves a scan succeeded. */
+async function readHistoryFile() {
+  const home = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh');
+  try {
+    return JSON.parse(await readFile(join(home, 'quota-card', 'platform.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/** `abcdef…wxyz`, never the whole value. */
+function maskToken(value) {
+  if (typeof value !== 'string' || value === '') return '(empty)';
+  if (value.length <= 10) return '****';
+  return value.slice(0, 6) + '****' + value.slice(-4);
+}
+
+/**
+ * The console token the PLUGIN resolves, i.e. the DSH credential entry named by
+ * `platformTokenRef` (default `DEEPSEEK_USER_TOKEN`).
+ *
+ * Verified against a real `$DSH_HOME/.credentials.yaml`: plain references live in
+ * a top-level `refs:` block as `NAME: value`, while `records:` holds richer
+ * records whose `payload.token` is the DSH ACCOUNT grant — a different credential
+ * that this API rejects. Only `refs:` is read here, so the two cannot be confused.
+ */
+async function readStoredToken(refName) {
+  const text = await readCredentials();
+  if (text === '') return null;
+  const wanted = typeof refName === 'string' && refName !== '' ? refName : 'DEEPSEEK_USER_TOKEN';
+  let inRefs = false;
+  for (const line of text.split(/\r?\n/)) {
+    if (/^\S/.test(line)) {
+      inRefs = /^refs:\s*$/.test(line);
+      continue;
+    }
+    if (!inRefs) continue;
+    const match = /^\s+([A-Za-z0-9_.\-]+):\s*(.*)$/.exec(line);
+    if (match === null || match[1] !== wanted) continue;
+    const value = match[2].trim().replace(/^["']|["']$/g, '');
+    if (value === '') continue;
+    return { value: normalizeUserToken(value) ?? value, source: 'DSH refs:' + wanted };
+  }
+  return null;
+}
+
 /**
  * Print a JSON payload's shape: keys, array lengths, and a small sample of the
  * values. Used to verify the undocumented console endpoints rather than assuming
@@ -153,20 +199,32 @@ const candidates = [];
 const apiKey = textArg('key') ?? env('DEEPSEEK_API_KEY');
 const userToken = normalizeUserToken(textArg('user-token') ?? env('DEEPSEEK_USER_TOKEN'));
 const fromFile = parsePlatformToken(await readCredentials());
+// The credential the PLUGIN actually uses, read from its own store location.
+// Testing only the environment and the account grant leaves the interesting
+// candidate untested, which is exactly what makes a failed rotation look like
+// an unexplained auth error.
+const storedToken = await readStoredToken(env('DSH_QUOTA_TOKEN_REF'));
 
-if (apiKey !== null) candidates.push({ label: 'inference API key', scheme: 'bearer', credential: apiKey, source: textArg('key') === null ? 'env' : 'argument' });
+if (storedToken !== null) candidates.push({ label: 'console userToken (plugin)', scheme: 'bearer', credential: storedToken.value, source: storedToken.source, fingerprint: maskToken(storedToken.value) });
 if (userToken !== null) candidates.push({ label: 'console userToken', scheme: 'bearer', credential: userToken, source: textArg('user-token') === null ? 'env' : 'argument' });
-if (fromFile !== null) candidates.push({ label: 'DSH platform grant', scheme: 'bearer', credential: fromFile, source: 'credentials file' });
+if (apiKey !== null) candidates.push({ label: 'inference API key', scheme: 'bearer', credential: apiKey, source: textArg('key') === null ? 'env' : 'argument' });
+// Last on purpose: the fallback retry below runs the bare-header scheme on the
+// LAST candidate, and the account grant is the one already known to be rejected.
+if (fromFile !== null) candidates.push({ label: 'DSH platform grant', scheme: 'bearer', credential: fromFile, source: 'credentials file records:' });
 
 if (candidates.length === 0) {
   console.log('No credential to test. Pass --key / --user-token, or set');
-  console.log('DEEPSEEK_API_KEY / DEEPSEEK_USER_TOKEN, or sign in to the account in DSH.');
+  console.log('DEEPSEEK_API_KEY / DEEPSEEK_USER_TOKEN, or store the console token with');
+  console.log('tools/set-platform-token.mjs.');
   process.exitCode = 1;
 } else {
   console.log('Testing against GET ' + COST_URL + '?month=' + month + '&year=' + year + '\n');
   let accepted = null;
   for (const candidate of candidates) {
     const result = await query(COST_URL + '?month=' + month + '&year=' + year, candidate.credential, candidate.scheme);
+    if (candidate.fingerprint !== undefined) {
+      console.log('stored token fingerprint (masked):', candidate.fingerprint);
+    }
     console.log(
       (candidate.label + ' (' + candidate.source + ')').padEnd(38),
       'len=' + String(candidate.credential.length).padEnd(4),

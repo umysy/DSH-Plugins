@@ -24,6 +24,7 @@ import { clockToMinutes, minutesToClock, normalizeConfig, toPublicConfig } from 
 import { createLedger } from '../lib/ledger.js';
 import {
   aggregatePlatformUsage,
+  createPlatformHistory,
   foldMonths,
   historyPayloadComplete,
   monthKey,
@@ -631,6 +632,71 @@ test('platformAuthFailure recognises the console envelope', () => {
   assert.equal(platformAuthFailure(403, null), true);
   assert.equal(platformAuthFailure(200, { code: 0, data: { biz_data: [] } }), false);
   assert.equal(platformAuthFailure(500, null), false);
+});
+
+test('invalidate marks the scan stale without discarding it, then rescans', async () => {
+  let calls = 0;
+  // Whichever month the scan asks for FIRST is the one that carries usage, so the
+  // fixture does not depend on the current date — a scan starts at "now", and
+  // hard-coding a month would make this test fail next month.
+  let firstMonth = null;
+  // The scan path calls fetch itself, so the transport is injected. Without this
+  // the test would reach platform.deepseek.com — the failure mode it is meant to
+  // prevent.
+  const fetchImpl = async (url) => {
+    calls += 1;
+    const month = /month=(\d+)/.exec(url)[1];
+    if (firstMonth === null) firstMonth = month;
+    const hit = month === firstMonth;
+    const body = url.includes('/cost')
+      ? { code: 0, data: { biz_data: [{ currency: 'CNY', total: [{ model: 'm', usage: [{ type: 'PROMPT_CACHE_MISS_TOKEN', amount: hit ? '3' : '0' }] }] }] } }
+      : { code: 0, data: { biz_data: { total: [{ model: 'm', usage: [{ type: 'PROMPT_CACHE_MISS_TOKEN', amount: hit ? '100' : '0' }, { type: 'REQUEST', amount: hit ? '2' : '0' }] }] } } };
+    return {
+      status: 200,
+      ok: true,
+      async text() {
+        return JSON.stringify(body);
+      },
+    };
+  };
+
+  const history = createPlatformHistory({
+    resolveToken: async () => 'token-value',
+    months: 6,
+    ttlMs: 600_000,
+    now: () => 1_000,
+    fetchImpl,
+  });
+
+  const payload = { months: 1, cost: 3, tokens: 100, billed: 100, cacheHits: 0, requests: 2, currency: 'CNY', newestMonth: '2026-09', oldestMonth: '2026-09', scannedAt: 1_000, source: 'platform' };
+  assert.equal(history.seed(payload), true);
+  assert.equal(history.current().stale, false);
+  assert.equal(history.current().fresh, true);
+
+  // A credential change: the numbers stay readable (a rescan may not reproduce
+  // an older month), but the payload is marked stale so the next refresh scans.
+  history.invalidate();
+  assert.equal(history.current().stale, true);
+  assert.equal(history.current().fresh, false);
+  assert.equal(history.current().cost, 3, 'the previous numbers are still served');
+  assert.equal(history.diagnostics().invalidations, 1);
+  assert.equal(calls, 0, 'invalidate must not scan from the writing request');
+
+  // The next refresh scans despite the unexpired TTL, and clears the stale flag.
+  await history.refresh('after-token-write');
+  assert.ok(calls > 0, 'the refresh scanned');
+  assert.equal(history.current().stale, false);
+  assert.equal(history.current().fresh, true);
+  assert.equal(history.diagnostics().scans, 1);
+  assert.equal(history.diagnostics().invalidations, 1, 'the invalidation is not counted as a failure');
+  assert.equal(history.current().months, 1, 'exactly the month that carries usage');
+  assert.equal(history.current().cost, 3);
+
+  // With nothing cached there is nothing to mark stale.
+  const empty = createPlatformHistory({ resolveToken: async () => null, months: 1, ttlMs: 1000, now: () => 1_000, fetchImpl });
+  empty.invalidate();
+  assert.equal(empty.diagnostics().invalidations, 0);
+  assert.equal(empty.current(), null);
 });
 
 test('historyPayloadComplete refuses a cache written by an older release', () => {

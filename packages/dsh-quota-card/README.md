@@ -42,7 +42,7 @@ DeepSeek Harness（DSH）侧边栏左下角的一张常驻卡片：**余额 / �
 dsh plugin --profile web add "github:umysy/DSH-Plugins"
 
 # dsh web：固定版本
-dsh plugin --profile web add "github:umysy/DSH-Plugins#v0.3.1"
+dsh plugin --profile web add "github:umysy/DSH-Plugins#v0.3.2"
 ```
 
 装完**重启 Harness**（插件发现按进程缓存），刷新页面。可用版本见 [Releases](https://github.com/umysy/DSH-Plugins/releases)。
@@ -91,7 +91,7 @@ dsh plugin --profile web remove dsh-quota-card
 | `prices` | `deepseek-flash` / `deepseek-v4-pro` | 高峰价（**CNY / 百万 token**），仅用于费用估算 |
 | `balancePollMs` | `60000` | 余额最短刷新间隔（Host 侧缓存，避免频繁打接口） |
 | `locale` | `zh_CN` | 随账号余额查询一起发送的身份信息，仅用于标记请求 |
-| `clientVersion` | `dsh-quota-card/0.3.1` | 同上 |
+| `clientVersion` | `dsh-quota-card/0.3.2` | 同上 |
 | `platformHistory` | `false` | 是否读取**开放平台账号历史**（累计消费 / 累计用量）。开启需要控制台 token，见下节 |
 | `platformTokenRef` | `DEEPSEEK_USER_TOKEN` | 控制台 token 的凭据名（环境变量 / DSH 凭据存储都按这个名字解析） |
 | `platformHistoryMonths` | `48` | 最多回溯多少个月（上限 120）；连续 3 个零消费月会提前停止 |
@@ -304,7 +304,7 @@ await (await fetch('/quota-card/snapshot', { cache: 'no-store' })).json()
 
 ---
 
-## 排障笔记：这个接口真实存在的九个坑
+## 排障笔记：这个接口真实存在的十个坑
 
 以下每一条都是在本插件开发过程中**实际踩到并修掉**的，症状与根因都保留了第一手记录。它们不是假想风险 —— 如果你要自己改这个插件、或写另一个接同样接口的插件，这几条能省掉大量时间。
 
@@ -395,19 +395,29 @@ records:
 
 **做法**：`--from-file <path>` —— 把值写进文件再让脚本读，完全绕开终端输入系统；脚本读完后会提示你立即删除该文件。
 
+### 10. 写入凭据后立刻重扫会与落盘竞态
+
+**症状**：保存新 token 后，`history state` 出现 `lastError: "auth-failed"` 与 `{"month":"2026-10","kind":"no-response"}`，看起来像新 token 无效；用探测脚本单独测同一份 token 却 `ACCEPTED (code 0)`。
+
+**根因**：写入路由在同一个 tick 里做了「`await credentials.set(...)` → 失效缓存 → 触发扫描」。那次扫描发出的请求抢在凭据真正落盘之前，于是带着旧值（或空值）去请求。
+
+**做法**：写入后只**标记过期**（`stale: true`，期间继续展示上一次的数字，因为重扫未必能复现更早的月份），由下一个轮询周期重扫；`invalidate()` 不再清空缓存。`stale` 与 `invalidations` 都在 `platform.history` 里可见。
+
 ### 附：诊断入口
 
 装好之后，这两个命令能回答绝大多数"数字不对"的问题：
 
 ```powershell
-# 扫描状态：凭据是否就位、扫了几个月、失败原因、两种口径的合计
+# 扫描状态：凭据是否就位、存的是哪一份（遮蔽指纹）、扫了几个月、失败原因、两种口径合计
 node tools/set-platform-token.mjs --check-only
 
-# 接口实测：结构大纲 + 本包解析结果 + 逐月消费轮廓（从不打印凭据）
+# 接口实测：逐个候选凭据的接受情况 + 结构大纲 + 本包解析结果 + 逐月消费轮廓
 node tools/probe-platform-usage.mjs --year 2026 --month 9 --scan 6
 ```
 
-`/quota-card/health` 的 `platform.history` 里有 `scans` / `failures` / `requestFailures` / `lastError` / `lastFailure` / `refusedSeed`，以及 `billedTokens` 与 `rawTokens`。
+探测脚本会**优先测试插件自己用的那份凭据**（`refs:DEEPSEEK_USER_TOKEN`），并打印它的遮蔽指纹 —— 早期版本不测这一份，于是"轮换是否成功"这个问题恰好得不到回答。
+
+`/quota-card/health` 的 `platform.history` 里有 `scans` / `failures` / `requestFailures` / `lastError` / `lastFailure` / `refusedSeed` / `invalidations` / `stale`，以及 `billedTokens` 与 `rawTokens`；`platform.token` 是**所存凭据的遮蔽指纹**（6 位前缀 + `****` + 4 位后缀），轮换前后一对比即可确认新值是否生效。
 
 ## License
 

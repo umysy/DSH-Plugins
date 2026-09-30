@@ -159,6 +159,9 @@ export function apply(ctx, rawConfig) {
     if (!config.platformHistory || credentialState.probe === 'missing') return;
     history.refresh('snapshot').then(
       (payload) => {
+        // A seeded payload from an older schema is refused and correctly stays
+        // absent until a real scan replaces it, so it is simply not persisted
+        // again here. Only a payload the current schema accepts is written.
         if (payload !== null) saveHistory(payload).catch(() => undefined);
       },
       (error) => console.error('quota-card: history refresh failed', error),
@@ -533,10 +536,19 @@ export function apply(ctx, rawConfig) {
           }
           await credentials.set(config.platformTokenRef, token);
           counters.tokenWrites += 1;
-          // A fresh credential invalidates the cached scan immediately.
+          // Mark the scan stale but do NOT scan from here. Kicking a scan in this
+          // same tick raced the credential write: the request went out before the
+          // value was durable and came back auth-failed, which then looked like
+          // the freshly rotated token was bad. The next poll picks it up, and any
+          // snapshot in the meantime requests a scan as well.
           history.invalidate();
-          refreshHistory();
-          sendJson(request, response, 200, { ok: true, stored: true, masked: maskSecret(token) });
+          const fingerprint = maskSecret(token);
+          sendJson(request, response, 200, {
+            ok: true,
+            stored: true,
+            masked: fingerprint,
+            next: 'the next snapshot requests a fresh scan (within one poll interval)',
+          });
         } catch (error) {
           sendJson(request, response, 502, {
             ok: false,
@@ -565,7 +577,20 @@ export function apply(ctx, rawConfig) {
     {
       kind: 'exact',
       path: ROUTE_HEALTH,
-      handler: (request, response) => {
+      handler: async (request, response) => {
+        // A masked fingerprint of the credential actually in the store. Without
+        // it there is no way to tell a successful rotation from a write that
+        // silently stored a placeholder or a one-character paste — both of which
+        // then look exactly like "the token expired".
+        let tokenFingerprint = null;
+        if (credentials !== null) {
+          try {
+            const resolved = await credentials.resolve(config.platformTokenRef);
+            tokenFingerprint = maskSecret(resolved?.value ?? null);
+          } catch {
+            tokenFingerprint = null;
+          }
+        }
         sendJson(request, response, 200, {
           ok: true,
           ledger: ledger.diagnostics(),
@@ -584,6 +609,7 @@ export function apply(ctx, rawConfig) {
             platformHistory: config.platformHistory,
             platformTokenRef: config.platformTokenRef,
             platformHistoryMonths: config.platformHistoryMonths,
+            showTotalTokens: config.showTotalTokens,
           },
           balance: {
             accountService: accountState.probe,
@@ -592,6 +618,7 @@ export function apply(ctx, rawConfig) {
           },
           platform: {
             credentials: credentialState.probe,
+            token: tokenFingerprint,
             history: history.diagnostics(),
           },
         });
