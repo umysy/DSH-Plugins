@@ -51,7 +51,22 @@
         # the DEEPSEEK_API_KEY environment variable. These two fields are just
         # the identity sent along with the account query.
         locale: zh_CN
-        clientVersion: dsh-quota-card/0.1.0
+        clientVersion: dsh-quota-card/0.3.0
+
+        # ── account history (the console's PRIVATE usage API) ─────────────────
+        # false = the card's "total spend / total tokens" rows count from the day
+        #         this plugin was installed (local ledger; needs no credential).
+        # true  = they show the whole account history, read from
+        #         platform.deepseek.com/api/v0/usage/{cost,amount} with the console
+        #         session token. Those endpoints are UNDOCUMENTED: if they change,
+        #         the card silently falls back to the local figures.
+        # Supplying the token (once): open platform.deepseek.com/usage while
+        # logged in, DevTools → Network → any `api/v0` request → copy the
+        # `Authorization` value, then POST it to this Harness (see README).
+        platformHistory: false
+        platformTokenRef: DEEPSEEK_USER_TOKEN
+        platformHistoryMonths: 48
+        platformHistoryTtlMs: 600000
 
         # ── price table (used only for the estimate; official billing wins) ───
         prices:

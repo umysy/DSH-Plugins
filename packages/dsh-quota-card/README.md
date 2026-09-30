@@ -91,6 +91,10 @@ dsh plugin --profile web remove dsh-quota-card
 | `balancePollMs` | `60000` | 余额最短刷新间隔（Host 侧缓存，避免频繁打接口） |
 | `locale` | `zh_CN` | 随账号余额查询一起发送的身份信息，仅用于标记请求 |
 | `clientVersion` | `dsh-quota-card/0.1.0` | 同上 |
+| `platformHistory` | `false` | 是否读取**开放平台账号历史**（累计消费 / 累计用量）。开启需要控制台 token，见下节 |
+| `platformTokenRef` | `DEEPSEEK_USER_TOKEN` | 控制台 token 的凭据名（环境变量 / DSH 凭据存储都按这个名字解析） |
+| `platformHistoryMonths` | `48` | 最多回溯多少个月（上限 120）；连续 3 个零消费月会提前停止 |
+| `platformHistoryTtlMs` | `600000` | 历史扫描的缓存时长（10 分钟） |
 
 ---
 
@@ -104,15 +108,64 @@ dsh plugin --profile web remove dsh-quota-card
 
 两条路都不可用时，余额行显示灰字「未登录 · 未配置 API Key」，其余指标照常工作。接口失败时保留上一次成功读数（状态点转黄），不会闪成错误。`/quota-card/health` 的 `balance` 字段会告诉你当前用的是哪条路（`accountService` / `hasApiKey` / `lastAccountError`）。
 
+### 累计消费 / 累计用量 —— 开放平台历史（可选，默认关闭）
+
+默认情况下，卡片上的「累计消费 / 累计用量」来自**本地账本**，起点是你**安装本插件那天**，悬停会写明这一点。
+
+想看到**账号创建至今**的真实总额，需要开启 `platformHistory`。它读的是开放平台用量页自己的接口：
+
+```
+GET https://platform.deepseek.com/api/v0/usage/cost?month=M&year=Y      → 该月消费
+GET https://platform.deepseek.com/api/v0/usage/amount?month=M&year=Y    → 该月 token 与请求数
+```
+
+**开启步骤**
+
+1. 浏览器登录 `https://platform.deepseek.com/usage`
+2. **F12 → Network**，筛选 `api/v0`，刷新页面
+3. 点任意一条 `usage/…` 请求 → **Headers → Request Headers**，复制 **`Authorization`** 的值（形如 `Bearer Y2w1…`）
+4. 让 Harness 保存它（token 只进本机 Host，不进浏览器存储、不进日志）：
+
+   ```powershell
+   $env:DEEPSEEK_USER_TOKEN="Bearer Y2w1…"; node "F:\DSH Plugins\packages\dsh-quota-card\tools\set-platform-token.mjs"
+   ```
+
+   ```powershell
+   Remove-Item Env:\DEEPSEEK_USER_TOKEN -ErrorAction SilentlyContinue
+   ```
+
+   也可以直接在 Harness 页面的控制台里 POST（结果输出版本号与遮蔽片段）：
+
+   ```js
+   await (await fetch('/quota-card/token', {
+     method: 'POST',
+     headers: { 'Content-Type': 'application/json' },
+     body: JSON.stringify({ token: 'Bearer Y2w1…' }),
+   })).json()
+   ```
+
+5. 在插件 `cordis.patch.yml` 里把 `platformHistory` 改成 `true`，重启 Harness
+6. 用 `--check-only` 确认扫描状态：
+
+   ```powershell
+   node "F:\DSH Plugins\packages\dsh-quota-card\tools\set-platform-token.mjs" --check-only
+   ```
+
+**注意**
+
+- 该 token 是**可复用的控制台会话凭据**，与推理 API Key 是两种东西（实测：API Key 与 DSH 账号凭据都被控制台拒绝，只有这个 token 被接受）
+- 它由 DSH 凭据服务保管（`ctx.credentials`，键名 `DEEPSEEK_USER_TOKEN`）；也可以用同名环境变量覆盖
+- `/quota-card/token` 是**唯一会写入的路由**：只接受回环地址且**非跨站**的请求（用 `Sec-Fetch-Site` 防 DNS-rebinding），写完后只回显遮蔽片段，绝不回显 token 本身
+- **这些接口是未公开的**，DeepSeek 改版即可能失效。失效时 `snapshot.platform` 整体缺失，卡片**静默退回**本地账本口径 —— 余额、今日/本月、峰谷判定永远不受影响
+- 扫描为逐月请求，最多 48 个月（可配），连续 3 个零消费月提前停止；结果缓存 10 分钟并落盘 `$DSH_HOME/quota-card/platform.json`，重启后立刻可见
+
 ### 卡片高度可拖动
 
 卡片底部有一条细手柄：**上下拖动**调整卡片高度（90–680px），松手后大小存在浏览器本地、刷新后保持；**双击手柄**恢复「自适应内容高度」。高度不足时卡片内部自动出现滚动条，不会把行挤掉。自适应模式下卡片还会自动避开窗口底部，不会长到被侧边栏裁掉。
 
 ### 今日 / 本月用量、缓存命中 —— 本地账本
 
-DeepSeek **没有公开的用量统计接口**（只有余额接口），控制台里的用量需要登录态 `userToken` + 未公开的 `/api/v0/usage/*`，无 SLA 且随官网改版失效，本插件**刻意不使用**。
-
-因此这三个数字来自 DSH 自己的链路：Host 侧挂 `llm/stream` waterfall，读每次模型调用 provider 实报的 `usage`：
+今日与本月这两个数字**始终**来自 DSH 自己的链路：Host 侧挂 `llm/stream` waterfall，读每次模型调用 provider 实报的 `usage`。这是刻意选择 —— 它零凭据、零私有接口、每笔调用都精确。
 
 - `inputTokens` = **未命中缓存的输入**（DSH 的 `TokenUsage` 明确说明各类计数互不重叠）
 - `cacheReadTokens` = 命中缓存读取，`cacheWriteTokens` = 缓存写入，`outputTokens` = 输出
@@ -124,8 +177,8 @@ DeepSeek **没有公开的用量统计接口**（只有余额接口），控制�
 - 会话标题、压缩等辅助调用的 `purpose` 会**单独打标**存进 `days[date].byPurpose`，便于排查；但**仍然计入**今日/本月总量（它们确实花了 token）。如果你希望只统计对话用量，可以基于该字段扩展。
 
 **已知边界**
-- 历史从**安装之后**开始累计（不回溯已有会话日志，也不重复计数），首次安装当天数字偏小属正常
-- 只统计经过本 Harness 的调用；其它客户端/网页端产生的用量不在其中
+- 只统计经过本 Harness 的调用；其它客户端/网页端产生的用量不在其中（要看账号全量请开 `platformHistory`）
+- 「累计消费 / 累计用量」默认就是这个账本的区间（自安装起）；开启 `platformHistory` 后才切换为账号历史
 - 账本落盘在 `$DSH_HOME/quota-card/usage.json`：原子写（临时文件 + rename）、5 秒节流 + **尾部补偿写入**（一波请求结束后仍会落盘一次）、保留 400 天
 - 文件损坏时改名隔离（`.corrupt-<时间戳>`）后从空账本继续；若连隔离都失败，插件会**拒绝写盘**并在内存里继续工作，以免用空账本覆盖真实数据。写盘失败一律降级为纯内存账本，绝不影响模型调用
 - 落盘发生在启动时首次读取**之后**，且读入的数据与读入期间已记录的调用会**合并**而不是互相覆盖

@@ -17,8 +17,12 @@
  *   - Nothing in the model-call path may throw. The usage tap logs and moves on.
  */
 
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+
 import { normalizeConfig, toPublicConfig } from './config.js';
 import { createLedger } from './ledger.js';
+import { createPlatformHistory } from './platform.js';
 import { resolveTier, zoneParts } from './pricing.js';
 
 /** Cordis plugin name (also the ledger namespace and the route prefix). */
@@ -26,6 +30,13 @@ export const name = 'quota-card';
 
 const ROUTE_SNAPSHOT = '/quota-card/snapshot';
 const ROUTE_HEALTH = '/quota-card/health';
+const ROUTE_TOKEN = '/quota-card/token';
+
+/** Upper bound for a pasted credential; the real token is ~64 chars. */
+const MAX_TOKEN_LENGTH = 4096;
+
+/** Upper bound for a JSON request body, so a wrong request cannot allocate. */
+const MAX_BODY_BYTES = 16 * 1024;
 
 /** Cached snapshot staleness. The snapshot itself is cheap; this only avoids
  * recomputing the month fold for several polls within the same second. */
@@ -64,11 +75,15 @@ export function apply(ctx, rawConfig) {
     balanceFromAccount: 0,
     balanceFromKey: 0,
     snapshotReads: 0,
+    tokenWrites: 0,
   };
   let snapshotCache = null;
   /** The `deepseekAccount` service, when this composition ships it. */
   let account = null;
   const accountState = { probe: 'pending', lastError: '' };
+  /** The `credentials` service, when this composition ships it. */
+  let credentials = null;
+  const credentialState = { probe: 'pending' };
 
   // The account seam is a SOFT probe: a profile without it keeps full balance
   // support through DEEPSEEK_API_KEY, and the entry still activates cleanly.
@@ -76,6 +91,82 @@ export function apply(ctx, rawConfig) {
     account = child.deepseekAccount ?? null;
     accountState.probe = account === null ? 'missing' : 'present';
   });
+
+  // Credentials matter only for the opt-in account history (the console's
+  // private API needs the console session token). Soft probe as well.
+  ctx.inject(['credentials'], (child) => {
+    credentials = child.credentials ?? null;
+    credentialState.probe = credentials === null ? 'missing' : 'present';
+  });
+
+  /**
+   * The platform console session token: the credential-resolution order is the
+   * documented one (environment, then the DSH credential store, which `.env`
+   * files layer under), and the value never leaves this process.
+   */
+  async function resolvePlatformToken() {
+    if (credentials === null) return null;
+    try {
+      const resolved = await credentials.resolve(config.platformTokenRef);
+      const raw = resolved !== null && resolved !== undefined && typeof resolved.value === 'string'
+        ? resolved.value.trim()
+        : '';
+      if (raw === '') return null;
+      // Accept exactly what the user copied: a bare token, or the whole
+      // `Bearer <token>` Authorization value from DevTools.
+      const withoutScheme = raw.replace(/^bearer\s+/i, '').trim();
+      return withoutScheme === '' ? null : withoutScheme;
+    } catch (error) {
+      accountState.lastError = String(error?.message ?? error).slice(0, 160);
+      return null;
+    }
+  }
+
+  // ── account history (opt-in; the console's private usage API) ──────────────
+
+  const historyFile = join(dirname(ledger.filePath), 'platform.json');
+
+  const history = createPlatformHistory({
+    resolveToken: resolvePlatformToken,
+    months: config.platformHistoryMonths,
+    ttlMs: config.platformHistoryTtlMs,
+    onError: (message, error) => console.error(message, error),
+  });
+
+  /** Persist the last good scan so a restart shows numbers before the first request. */
+  async function saveHistory(payload) {
+    try {
+      await mkdir(dirname(historyFile), { recursive: true });
+      await writeFile(historyFile + '.tmp', JSON.stringify(payload), 'utf8');
+      await rename(historyFile + '.tmp', historyFile);
+    } catch (error) {
+      console.error('quota-card: could not persist the platform history', error);
+    }
+  }
+
+  async function loadHistory() {
+    try {
+      const parsed = JSON.parse(await readFile(historyFile, 'utf8'));
+      history.seed(parsed);
+    } catch {
+      /* no persisted history yet is the normal first run */
+    }
+  }
+
+  /**
+   * Kick a scan when one is due and persist the result. Deliberately NOT awaited
+   * by the snapshot route: a slow or failing console call must never delay the
+   * local numbers the card always has.
+   */
+  function refreshHistory() {
+    if (!config.platformHistory || credentialState.probe === 'missing') return;
+    history.refresh('snapshot').then(
+      (payload) => {
+        if (payload !== null) saveHistory(payload).catch(() => undefined);
+      },
+      (error) => console.error('quota-card: history refresh failed', error),
+    );
+  }
 
   // ── usage tap ───────────────────────────────────────────────────────────────
 
@@ -284,16 +375,78 @@ export function apply(ctx, rawConfig) {
         makeup: tier.makeup,
         date: tier.date,
       },
-      usage: { today: ledger.today(now), month: ledger.month(now) },
+      usage: { today: ledger.today(now), month: ledger.month(now), lifetime: ledger.lifetime() },
+      platform: config.platformHistory ? history.current() : null,
       balanceSource: account === null
         ? (apiKey() === '' ? 'none' : 'api-key')
         : (accountState.probe === 'present' ? 'account' : 'none'),
     };
     snapshotCache = { at: now, value };
+    // Fire-and-forget: the reply never waits for the console.
+    refreshHistory();
     return value;
   }
 
   // ── routes ──────────────────────────────────────────────────────────────────
+
+  /**
+   * The bridge is loopback-only, and a mutation additionally requires that the
+   * request is not cross-site. `Sec-Fetch-Site` is sent by every browser and is
+   * the DNS-rebinding defence: a page on another origin cannot forge it, while a
+   * request from the desktop shell's own `dsh-app://` origin is still allowed
+   * (it may omit `Origin` entirely, which is why that header alone is not used).
+   */
+  function isLoopbackRequest(request, requireSameSite) {
+    const address = request?.socket?.remoteAddress;
+    if (address !== '127.0.0.1' && address !== '::1' && address !== '::ffff:127.0.0.1') return false;
+    const host = request?.headers?.host;
+    if (typeof host !== 'string' || host === '') return false;
+    let hostUrl;
+    try {
+      hostUrl = new URL('http://' + host);
+    } catch {
+      return false;
+    }
+    if (hostUrl.hostname !== '127.0.0.1' && hostUrl.hostname !== 'localhost' && hostUrl.hostname !== '[::1]') return false;
+    if (requireSameSite !== true) return true;
+    const site = request.headers['sec-fetch-site'];
+    if (site === 'cross-site') return false;
+    if (site === undefined) {
+      // No fetch metadata at all: accept only when no Origin claims another site.
+      const origin = request.headers.origin;
+      if (origin === undefined) return true;
+      try {
+        return new URL(origin).host === hostUrl.host;
+      } catch {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** Read a bounded JSON body; null when it is too large or not an object. */
+  async function readJsonBody(request) {
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of request) {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) return null;
+      chunks.push(chunk);
+    }
+    try {
+      const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      return parsed !== null && typeof parsed === 'object' ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** `abcdef…wxyz` — never the whole value, never reversible in practice. */
+  function maskSecret(value) {
+    if (typeof value !== 'string' || value === '') return null;
+    if (value.length <= 10) return '****';
+    return value.slice(0, 6) + '****' + value.slice(-4);
+  }
 
   function corsHeaders(request) {
     const origin = request?.headers?.origin;
@@ -345,6 +498,52 @@ export function apply(ctx, rawConfig) {
   const routes = [
     {
       kind: 'exact',
+      path: ROUTE_TOKEN,
+      handler: async (request, response) => {
+        // Writing a credential is the one mutating route, so it is gated on a
+        // loopback peer AND a same-origin request — a browser tab on another
+        // origin cannot post the token here.
+        if (isLoopbackRequest(request, true) === false) {
+          sendJson(request, response, 403, { ok: false, error: 'forbidden' });
+          return;
+        }
+        if (request.method !== 'POST') {
+          sendJson(request, response, 405, { ok: false, error: 'method-not-allowed' });
+          return;
+        }
+        if (credentials === null) {
+          sendJson(request, response, 503, { ok: false, error: 'credentials-unavailable' });
+          return;
+        }
+        try {
+          const body = await readJsonBody(request);
+          const raw = body !== null && typeof body.token === 'string' ? body.token.trim() : '';
+          const token = raw.replace(/^bearer\s+/i, '').trim();
+          if (token === '') {
+            sendJson(request, response, 400, { ok: false, error: 'empty-token' });
+            return;
+          }
+          if (token.length > MAX_TOKEN_LENGTH) {
+            sendJson(request, response, 400, { ok: false, error: 'token-too-long' });
+            return;
+          }
+          await credentials.set(config.platformTokenRef, token);
+          counters.tokenWrites += 1;
+          // A fresh credential invalidates the cached scan immediately.
+          history.invalidate();
+          refreshHistory();
+          sendJson(request, response, 200, { ok: true, stored: true, masked: maskSecret(token) });
+        } catch (error) {
+          sendJson(request, response, 502, {
+            ok: false,
+            error: 'store-failed',
+            detail: String(error?.message ?? error).slice(0, 160),
+          });
+        }
+      },
+    },
+    {
+      kind: 'exact',
       path: ROUTE_SNAPSHOT,
       handler: async (request, response) => {
         counters.snapshotReads += 1;
@@ -378,11 +577,18 @@ export function apply(ctx, rawConfig) {
             models: Object.keys(config.prices),
             balancePollMs: config.balancePollMs,
             clientVersion: config.clientVersion,
+            platformHistory: config.platformHistory,
+            platformTokenRef: config.platformTokenRef,
+            platformHistoryMonths: config.platformHistoryMonths,
           },
           balance: {
             accountService: accountState.probe,
             hasApiKey: apiKey() !== '',
             lastAccountError: accountState.lastError,
+          },
+          platform: {
+            credentials: credentialState.probe,
+            history: history.diagnostics(),
           },
         });
       },
@@ -407,6 +613,12 @@ export function apply(ctx, rawConfig) {
       ledger.load().then(
         () => undefined,
         (error) => console.error('quota-card: ledger load failed', error),
+      );
+      // Seed the last good history scan so the card shows real numbers before
+      // the first console request finishes, then let the first snapshot refresh.
+      loadHistory().then(
+        () => undefined,
+        () => undefined,
       );
       return () => {
         ledger.flush().catch((error) => console.error('quota-card: final flush failed', error));

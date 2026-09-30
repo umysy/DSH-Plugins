@@ -391,6 +391,11 @@ window.__ModuleLoader__.load({
       cacheHit: '\u7f13\u5b58\u547d\u4e2d',
       costToday: '\u4eca\u65e5\u4f30\u7b97',
       costMonth: '\u672c\u6708\u4f30\u7b97',
+      lifetimeCost: '\u7d2f\u8ba1\u6d88\u8d39',
+      lifetimeTokens: '\u7d2f\u8ba1\u7528\u91cf',
+      sinceInstall: '\u81ea\u672c\u63d2\u4ef6\u5b89\u88c5\u8d77\u7d2f\u8ba1\uff08\u672c\u5730\u8d26\u672c\uff09',
+      platformSource: '\u6765\u81ea DeepSeek \u5f00\u653e\u5e73\u53f0\u5386\u53f2\u8bb0\u5f55',
+      requests: '\u6b21\u8bf7\u6c42',
       peakPeriod: '\u9ad8\u5cf0\u65f6\u6bb5\uff1a\u5468\u4e00\u81f3\u5468\u4e94',
       offPeakNote: '\uff08\u5176\u4f59\u4e3a\u7a7a\u95f2\u65f6\u6bb5\uff09',
       peakNow: '\u9ad8\u5cf0\u4e2d',
@@ -422,6 +427,11 @@ window.__ModuleLoader__.load({
       cacheHit: 'Cache hit',
       costToday: 'Today (est.)',
       costMonth: 'Month (est.)',
+      lifetimeCost: 'Total spend',
+      lifetimeTokens: 'Total tokens',
+      sinceInstall: 'counted locally, since this plugin was installed',
+      platformSource: 'from the DeepSeek platform account history',
+      requests: 'requests',
       peakPeriod: 'Peak: Mon\u2013Fri',
       offPeakNote: '(all other hours are off-peak)',
       peakNow: 'Peak',
@@ -669,6 +679,8 @@ window.__ModuleLoader__.load({
       var usage = snapshot && snapshot.usage ? snapshot.usage : {};
       var today = usage.today || null;
       var month = usage.month || null;
+      var life = usage.lifetime || null;
+      var platform = snapshot && snapshot.platform ? snapshot.platform : null;
       var balance = snapshot && snapshot.balance ? snapshot.balance : null;
       var showEstimatedCost = showCost || config.showCost === true;
 
@@ -707,6 +719,36 @@ window.__ModuleLoader__.load({
         { key: 'month', label: t('month'), value: month === null ? '--' : formatTokens(month.tokens) },
         { key: 'cache', label: t('cacheHit'), value: today === null ? '--' : formatPercent(today.cacheHitRate) },
       ];
+      // Prefer the console's account-wide history when it is available; fall back
+      // to the local ledger's own range, labelled so the difference is obvious.
+      var hasPlatform = platform !== null && platform.error === undefined && platform.cost !== undefined;
+      if (hasPlatform) {
+        rows.push({
+          key: 'lifeCost',
+          label: t('lifetimeCost'),
+          value: formatMoney(platform.cost, platform.currency || 'CNY'),
+          title: (platform.oldestMonth || '?') + ' ~ ' + (platform.newestMonth || '?') + '\n' + t('platformSource'),
+        });
+        rows.push({
+          key: 'lifeTokens',
+          label: t('lifetimeTokens'),
+          value: formatTokens(platform.tokens),
+          title: formatTokens(platform.requests) + ' ' + t('requests') + '\n' + t('platformSource'),
+        });
+      } else if (life !== null) {
+        rows.push({
+          key: 'lifeCost',
+          label: t('lifetimeCost'),
+          value: formatMoney(life.cost, 'CNY') + (life.costApproximate ? '*' : ''),
+          title: (life.from || '--') + ' ~ ' + (life.to || '--') + '\n' + t('sinceInstall'),
+        });
+        rows.push({
+          key: 'lifeTokens',
+          label: t('lifetimeTokens'),
+          value: formatTokens(life.tokens),
+          title: (life.from || '--') + ' ~ ' + (life.to || '--') + '\n' + t('sinceInstall'),
+        });
+      }
       if (showEstimatedCost) {
         rows.push({
           key: 'costToday',

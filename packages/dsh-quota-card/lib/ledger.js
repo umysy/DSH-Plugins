@@ -366,6 +366,30 @@ export function createLedger(options) {
     return { month: monthKey, ...summary };
   }
 
+  /**
+   * Everything this ledger has ever recorded, plus the day range it covers.
+   * That range is the honest caveat: this counts from the day the plugin was
+   * installed, NOT since the account was created — lifetime history only exists
+   * in the console, see `lib/platform.js`.
+   */
+  function lifetime() {
+    const entries = [];
+    let days = 0;
+    let from = null;
+    let to = null;
+    for (const [date, day] of Object.entries(state.days)) {
+      days += 1;
+      if (from === null || date < from) from = date;
+      if (to === null || date > to) to = date;
+      entries.push(...entriesOf(day));
+    }
+    const summary = summarize(foldEntries(entries), entries);
+    summary.days = days;
+    summary.from = from;
+    summary.to = to;
+    return summary;
+  }
+
   /** Diagnostics for `GET /quota-card/health`. */
   function diagnostics() {
     const parts = zoneParts(now(), config.timezone);
@@ -388,6 +412,7 @@ export function createLedger(options) {
     record,
     today,
     month,
+    lifetime,
     diagnostics,
     /** Drop stale buckets and persist immediately (used on dispose). */
     async flush() {

@@ -53,7 +53,16 @@ export const DEFAULTS = {
   // Sent to the official account seam when it supplies the balance. Purely
   // informational; the seam uses it to tag the request, not to authorize it.
   locale: 'zh_CN',
-  clientVersion: 'dsh-quota-card/0.1.0',
+  clientVersion: 'dsh-quota-card/0.3.0',
+  // ── account history (the console's private usage API) ─────────────────────
+  // Off by default: it needs the console session token (the `userToken` in
+  // platform.deepseek.com's localStorage) and it reads an UNDOCUMENTED endpoint.
+  // With it on, the lifetime rows show the whole account history instead of the
+  // local ledger's own (install-date onward) range.
+  platformHistory: false,
+  platformTokenRef: 'DEEPSEEK_USER_TOKEN',
+  platformHistoryMonths: 48,
+  platformHistoryTtlMs: 600000,
 };
 
 /**
@@ -240,6 +249,10 @@ export function normalizeConfig(raw, defaultYear) {
     balancePollMs: DEFAULTS.balancePollMs,
     locale: DEFAULTS.locale,
     clientVersion: DEFAULTS.clientVersion,
+    platformHistory: DEFAULTS.platformHistory,
+    platformTokenRef: DEFAULTS.platformTokenRef,
+    platformHistoryMonths: DEFAULTS.platformHistoryMonths,
+    platformHistoryTtlMs: DEFAULTS.platformHistoryTtlMs,
   };
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return config;
 
@@ -255,6 +268,14 @@ export function normalizeConfig(raw, defaultYear) {
   if (raw.balancePollMs !== undefined) config.balancePollMs = positiveInt(raw.balancePollMs, DEFAULTS.balancePollMs);
   if (typeof raw.locale === 'string' && raw.locale.trim() !== '') config.locale = raw.locale.trim();
   if (typeof raw.clientVersion === 'string' && raw.clientVersion.trim() !== '') config.clientVersion = raw.clientVersion.trim();
+  if (raw.platformHistory !== undefined) config.platformHistory = raw.platformHistory === true;
+  if (typeof raw.platformTokenRef === 'string' && raw.platformTokenRef.trim() !== '') config.platformTokenRef = raw.platformTokenRef.trim();
+  if (raw.platformHistoryMonths !== undefined) {
+    config.platformHistoryMonths = Math.min(positiveInt(raw.platformHistoryMonths, DEFAULTS.platformHistoryMonths), 120);
+  }
+  if (raw.platformHistoryTtlMs !== undefined) {
+    config.platformHistoryTtlMs = positiveInt(raw.platformHistoryTtlMs, DEFAULTS.platformHistoryTtlMs);
+  }
 
   const multiplier = Number(raw.peakMultiplier);
   if (Number.isFinite(multiplier) && multiplier > 0) config.peakMultiplier = multiplier;

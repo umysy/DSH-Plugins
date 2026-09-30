@@ -23,6 +23,18 @@ import test from 'node:test';
 import { clockToMinutes, minutesToClock, normalizeConfig, toPublicConfig } from '../lib/config.js';
 import { createLedger } from '../lib/ledger.js';
 import {
+  aggregatePlatformUsage,
+  foldMonths,
+  monthKey,
+  monthRange,
+  parsePlatformToken,
+  platformAuthFailure,
+  scanHistory,
+  shiftMonth,
+  sumMonthCost,
+  sumMonthTokens,
+} from '../lib/platform.js';
+import {
   addTotals,
   cacheHitRate,
   estimateCost,
@@ -529,22 +541,285 @@ test('clock helpers round-trip in the canonical zero-padded form', () => {
   assert.equal(late.peakWindows[0].endMinutes, 1440);
 });
 
-test('the account seam fields have defaults and reject garbage', () => {
+// ── platform credential parsing ───────────────────────────────────────────────
+
+test('the platform-history settings default to off and stay bounded', () => {
   const base = normalizeConfig({}, 2026);
-  assert.equal(base.locale, 'zh_CN');
-  assert.ok(base.clientVersion.length > 0);
-  assert.equal(base.balancePollMs, 60000);
+  // Off by default: nothing reaches the console until the user opts in.
+  assert.equal(base.platformHistory, false);
+  assert.equal(base.platformTokenRef, 'DEEPSEEK_USER_TOKEN');
+  assert.equal(base.platformHistoryMonths, 48);
+  assert.equal(base.platformHistoryTtlMs, 600000);
 
-  const custom = normalizeConfig({ locale: 'en_US', clientVersion: 'x/1', balancePollMs: 5000 }, 2026);
-  assert.equal(custom.locale, 'en_US');
-  assert.equal(custom.clientVersion, 'x/1');
-  assert.equal(custom.balancePollMs, 5000);
+  const on = normalizeConfig({ platformHistory: true, platformHistoryMonths: 12, platformHistoryTtlMs: 1000 }, 2026);
+  assert.equal(on.platformHistory, true);
+  assert.equal(on.platformHistoryMonths, 12);
+  assert.equal(on.platformHistoryTtlMs, 1000);
 
-  // Garbage falls back rather than reaching the account seam.
-  const garbage = normalizeConfig({ locale: 42, clientVersion: {}, balancePollMs: -1 }, 2026);
-  assert.equal(garbage.locale, base.locale);
-  assert.equal(garbage.clientVersion, base.clientVersion);
-  assert.equal(garbage.balancePollMs, base.balancePollMs);
+  // A truthy-but-not-true value does not switch it on, and the month cap holds.
+  assert.equal(normalizeConfig({ platformHistory: 'yes' }, 2026).platformHistory, false);
+  assert.equal(normalizeConfig({ platformHistoryMonths: 9999 }, 2026).platformHistoryMonths, 120);
+  assert.equal(normalizeConfig({ platformHistoryMonths: 0 }, 2026).platformHistoryMonths, 48);
+  assert.equal(normalizeConfig({ platformTokenRef: 42 }, 2026).platformTokenRef, 'DEEPSEEK_USER_TOKEN');
+});
+
+/** The shape of a real `$DSH_HOME/.credentials.yaml`, with fake secrets. */
+const CREDENTIALS_FIXTURE = [
+  'version: 1',
+  'records:',
+  '  client-connection/browser-session:',
+  '    kind: grant',
+  '    payload:',
+  '      version: 1',
+  '      secret: abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ',
+  '  deepseek-account-platform/device:',
+  '    kind: grant',
+  '    payload:',
+  '      id: a6d9ffa5-f109-4608-83ce-a422f0c1c8c0',
+  '  deepseek-account-platform/default:',
+  '    kind: grant',
+  '    payload:',
+  '      version: 1',
+  '      token: PLATFORMTOKEN0123456789abcdefghijklmnopqrstuvwxyzABCDEFGH',
+  '      issuer: https://platform.deepseek.com',
+  'refs:',
+  '  DEEPSEEK_API_KEY: sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+].join('\n');
+
+test('parsePlatformToken reads the platform grant, not the API key', () => {
+  // Regression: an indent-comparing implementation treated the nested `payload:`
+  // container as a new top-level key, so the token line was skipped entirely.
+  assert.equal(parsePlatformToken(CREDENTIALS_FIXTURE), 'PLATFORMTOKEN0123456789abcdefghijklmnopqrstuvwxyzABCDEFGH');
+  // The sibling `refs` entry must never be returned as the platform token.
+  assert.notEqual(parsePlatformToken(CREDENTIALS_FIXTURE), 'sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+});
+
+test('parsePlatformToken handles quoting, absence, and edge shapes', () => {
+  const quoted = CREDENTIALS_FIXTURE.replace(
+    'token: PLATFORMTOKEN0123456789abcdefghijklmnopqrstuvwxyzABCDEFGH',
+    'token: "quoted-token-value"',
+  );
+  assert.equal(parsePlatformToken(quoted), 'quoted-token-value');
+  const single = CREDENTIALS_FIXTURE.replace(
+    'token: PLATFORMTOKEN0123456789abcdefghijklmnopqrstuvwxyzABCDEFGH',
+    "token: 'single-quoted'",
+  );
+  assert.equal(parsePlatformToken(single), 'single-quoted');
+
+  // Signed out: the platform record exists but carries no token.
+  const signedOut = CREDENTIALS_FIXTURE.replace(/^ {6}token:.*\n/m, '');
+  assert.equal(parsePlatformToken(signedOut), null);
+  // A token under some OTHER grant is not the platform session token.
+  const wrongOwner = CREDENTIALS_FIXTURE
+    .replace(/^ {6}token:.*\n/m, '')
+    .replace('    secret: abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ', '    token: not-the-platform-one');
+  assert.equal(parsePlatformToken(wrongOwner), null);
+  // Tolerates CRLF and blank lines.
+  assert.ok(parsePlatformToken(CREDENTIALS_FIXTURE.replace(/\n/g, '\r\n')));
+  assert.equal(parsePlatformToken(''), null);
+  assert.equal(parsePlatformToken('not yaml at all'), null);
+  assert.equal(parsePlatformToken(null), null);
+});
+
+test('platformAuthFailure recognises the console envelope', () => {
+  assert.equal(platformAuthFailure(200, { code: 40002, msg: 'Missing Token' }), true);
+  assert.equal(platformAuthFailure(200, { code: 40003 }), true);
+  assert.equal(platformAuthFailure(401, null), true);
+  assert.equal(platformAuthFailure(403, null), true);
+  assert.equal(platformAuthFailure(200, { code: 0, data: { biz_data: [] } }), false);
+  assert.equal(platformAuthFailure(500, null), false);
+});
+
+test('sumMonthCost and sumMonthTokens read the console payload shape', () => {
+  const costPayload = {
+    code: 0,
+    data: {
+      biz_data: [{
+        currency: 'CNY',
+        total: [
+          { model: 'deepseek-flash', usage: [{ type: 'PROMPT_CACHE_HIT_TOKEN', amount: '120' }, { type: 'RESPONSE_TOKEN', amount: '30' }, { type: 'REQUEST', amount: '7' }] },
+          { model: 'deepseek-v4-pro', usage: [{ type: 'PROMPT_CACHE_MISS_TOKEN', amount: '50' }] },
+        ],
+      }],
+    },
+  };
+  const amountPayload = {
+    code: 0,
+    data: {
+      // Observed live: `amount.biz_data` is an OBJECT while `cost.biz_data` is an
+      // ARRAY. Both shapes must keep working.
+      biz_data: {
+        total: [
+          { model: 'deepseek-flash', usage: [{ type: 'PROMPT_CACHE_HIT_TOKEN', amount: '1000' }, { type: 'RESPONSE_TOKEN', amount: '200' }, { type: 'REQUEST', amount: '3' }] },
+        ],
+      },
+    },
+  };
+  const cost = sumMonthCost(costPayload);
+  assert.equal(cost.cost, 200); // 120 + 30 + 50, REQUEST excluded
+  assert.equal(cost.currency, 'CNY');
+  assert.equal(cost.byModel['deepseek-flash'], 150);
+
+  const tokens = sumMonthTokens(amountPayload);
+  assert.equal(tokens.tokens, 1200); // REQUEST excluded
+  assert.equal(tokens.requests, 3);
+  assert.equal(tokens.byType.PROMPT_CACHE_HIT_TOKEN, 1000);
+  // The array form of `amount.biz_data` (an older/other deployment) also works.
+  assert.equal(sumMonthTokens({ code: 0, data: { biz_data: [amountPayload.data.biz_data] } }).tokens, 1200);
+
+  const facts = aggregatePlatformUsage(costPayload, amountPayload, { year: 2026, month: 9 });
+  assert.equal(facts.month, '2026-09');
+  assert.equal(facts.cost, 200);
+  assert.equal(facts.tokens, 1200);
+  assert.equal(facts.requests, 3);
+  assert.equal(aggregatePlatformUsage(null, null, { year: 2026, month: 9 }), null);
+});
+
+test('foldMonths totals a spend history and reports its coverage', () => {
+  const months = [
+    { month: '2026-09', cost: 12.5, tokens: 1_000_000, requests: 40, currency: 'CNY', byModel: { 'deepseek-flash': 1_000_000 } },
+    { month: '2026-08', cost: 7.5, tokens: 500_000, requests: 20, currency: 'CNY', byModel: { 'deepseek-flash': 300_000, 'deepseek-v4-pro': 200_000 } },
+  ];
+  const total = foldMonths(months);
+  assert.equal(total.cost, 20);
+  assert.equal(total.tokens, 1_500_000);
+  assert.equal(total.requests, 60);
+  assert.equal(total.oldestMonth, '2026-08');
+  assert.equal(total.newestMonth, '2026-09');
+  assert.equal(total.months, 2);
+  assert.equal(total.byModel['deepseek-flash'], 1_300_000);
+  assert.equal(foldMonths([]).cost, 0);
+});
+
+test('month cursors walk across year boundaries', () => {
+  assert.deepEqual(shiftMonth({ year: 2026, month: 1 }, -1), { year: 2025, month: 12 });
+  assert.deepEqual(shiftMonth({ year: 2025, month: 12 }, 1), { year: 2026, month: 1 });
+  assert.deepEqual(shiftMonth({ year: 2026, month: 3 }, -5), { year: 2025, month: 10 });
+  assert.deepEqual(monthRange({ year: 2026, month: 2 }, 3), [
+    { year: 2026, month: 2 },
+    { year: 2026, month: 1 },
+    { year: 2025, month: 12 },
+  ]);
+  assert.equal(monthKey({ year: 2026, month: 9 }), '2026-09');
+});
+
+test('scanHistory walks back, stops after a run of empty months', async () => {
+  // September and August have usage; July and earlier are empty, so the walk
+  // stops after three empty months instead of scanning the whole range.
+  const spend = { '2026-09': 42.8, '2026-08': 250.8 };
+  const asked = [];
+  const request = async (url) => {
+    asked.push(url);
+    const month = /month=(\d+)/.exec(url)[1];
+    const year = /year=(\d+)/.exec(url)[1];
+    const key = year + '-' + String(month).padStart(2, '0');
+    const cost = spend[key];
+    if (url.includes('/cost')) {
+      return {
+        code: 0,
+        data: {
+          biz_code: 0,
+          biz_data: [{
+            currency: 'CNY',
+            total: [{ model: 'deepseek-flash', usage: [{ type: 'RESPONSE_TOKEN', amount: String(cost ?? 0) }, { type: 'REQUEST', amount: '0' }] }],
+          }],
+        },
+      };
+    }
+    return {
+      code: 0,
+      data: {
+        biz_code: 0,
+        biz_data: {
+          total: [{
+            model: 'deepseek-flash',
+            usage: [
+              { type: 'RESPONSE_TOKEN', amount: cost === undefined ? '0' : '1000' },
+              { type: 'REQUEST', amount: cost === undefined ? '0' : '5' },
+            ],
+          }],
+        },
+      },
+    };
+  };
+
+  const { total, stoppedBy } = await scanHistory({
+    from: { year: 2026, month: 9 },
+    months: 24,
+    request,
+  });
+  assert.equal(total.cost, 42.8 + 250.8);
+  assert.equal(total.tokens, 2000);
+  assert.equal(total.requests, 10);
+  assert.equal(total.months, 2, 'the trailing empty months are not collected');
+  assert.equal(total.newestMonth, '2026-09');
+  assert.equal(total.oldestMonth, '2026-08');
+  assert.equal(stoppedBy, 'empty-streak');
+  // 2026-09 and 08 carry usage; 07, 06, 05 are empty and end the walk.
+  assert.equal(total.scanned, 5, '09, 08 found; 07, 06, 05 empty end the walk');
+  assert.equal(asked.length, 10); // two endpoints per scanned month
+});
+
+test('scanHistory does not abort when the newest month is empty', async () => {
+  // An account whose current month has no usage must still reach its history.
+  // The empty leading months are skipped, not counted and not collected.
+  const spend = { '2026-07': 5 };
+  const request = async (url) => {
+    const month = /month=(\d+)/.exec(url)[1];
+    const year = /year=(\d+)/.exec(url)[1];
+    const cost = spend[year + '-' + String(month).padStart(2, '0')];
+    if (url.includes('/cost')) {
+      return { code: 0, data: { biz_data: [{ currency: 'CNY', total: [{ model: 'm', usage: [{ type: 'RESPONSE_TOKEN', amount: String(cost ?? 0) }] }] }] } };
+    }
+    return { code: 0, data: { biz_data: { total: [{ model: 'm', usage: [{ type: 'REQUEST', amount: cost === undefined ? '0' : '1' }] }] } } };
+  };
+  const { total, stoppedBy } = await scanHistory({ from: { year: 2026, month: 9 }, months: 12, request });
+  assert.equal(total.cost, 5);
+  assert.equal(total.oldestMonth, '2026-07');
+  assert.equal(total.newestMonth, '2026-07', '08 and 09 carried no usage, so they are not part of the coverage');
+  assert.equal(total.months, 1);
+  assert.equal(total.scanned, 6, '09, 08 empty; 07 found; 06, 05, 04 empty end the walk');
+  assert.equal(stoppedBy, 'empty-streak');
+});
+
+test('scanHistory stops when a request fails outright', async () => {
+  const request = async () => null;
+  const { total, stoppedBy } = await scanHistory({ from: { year: 2026, month: 9 }, months: 12, request });
+  assert.equal(total.months, 0);
+  assert.equal(stoppedBy, 'request-failed');
+  assert.equal(total.scanned, 1);
+});
+
+test('scanHistory reports an account with no usage instead of claiming a finding', async () => {
+  let calls = 0;
+  const request = async () => {
+    calls += 1;
+    return { code: 0, data: { biz_code: 0, biz_data: [] } };
+  };
+  const { total, stoppedBy } = await scanHistory({ from: { year: 2026, month: 9 }, months: 24, request });
+  assert.equal(total.months, 0);
+  assert.equal(total.cost, 0);
+  assert.equal(stoppedBy, 'all-empty');
+  assert.equal(total.scanned, 3, 'three empty months are enough to conclude');
+  assert.equal(calls, 6);
+});
+
+test('scanHistory caps how far back it will look', async () => {
+  // A payload with a non-zero cost keeps the walk going, so the cap is what
+  // stops it.
+  let calls = 0;
+  const request = async (url) => {
+    calls += 1;
+    if (url.includes('/cost')) {
+      return { code: 0, data: { biz_data: [{ currency: 'CNY', total: [{ model: 'm', usage: [{ type: 'RESPONSE_TOKEN', amount: '1' }] }] }] } };
+    }
+    return { code: 0, data: { biz_data: { total: [{ model: 'm', usage: [{ type: 'REQUEST', amount: '1' }] }] } } };
+  };
+  const { total } = await scanHistory({ from: { year: 2026, month: 9 }, months: 9999, request });
+  // MAX_SCAN_MONTHS is 120, two endpoints per month.
+  assert.equal(calls, 240);
+  assert.equal(total.months, 120);
+  assert.equal(total.stoppedBy, 'range-exhausted');
 });
 
 // ── ledger ordering ───────────────────────────────────────────────────────────
@@ -577,8 +852,34 @@ test('today() and month() are empty until something is recorded or loaded', asyn
   assert.equal(ledger.today().tokens, 0);
   assert.equal(ledger.today().cacheHitRate, null);
   assert.equal(ledger.month().tokens, 0);
+  assert.equal(ledger.lifetime().tokens, 0);
+  assert.equal(ledger.lifetime().from, null);
   assert.equal(ledger.diagnostics().loaded, false);
   await ledger.load();
   assert.equal(ledger.diagnostics().loaded, true);
+  await ledger.flush();
+});
+
+test('lifetime() spans every recorded day and reports its range', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'quota-card-'));
+  const filePath = join(dir, 'usage.json');
+  let clock = bj(2026, 9, 30, 10, 0);
+  const ledger = createLedger({ config: CONFIG, filePath, now: () => clock });
+  const usage = { inputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 10 };
+
+  ledger.record({ at: clock, model: 'deepseek-flash', usage });
+  clock = bj(2026, 10, 2, 20, 0);
+  ledger.record({ at: clock, model: 'deepseek-flash', usage });
+
+  const life = ledger.lifetime();
+  assert.equal(life.tokens, 220);
+  assert.equal(life.totals.requests, 2);
+  assert.equal(life.days, 2);
+  assert.equal(life.from, '2026-09-30');
+  assert.equal(life.to, '2026-10-02');
+  // Two days, two different tiers: 09-30 10:00 is peak, 10-02 20:00 (National
+  // Day holiday) is off-peak — the lifetime fold keeps both.
+  assert.equal(life.peak, 110);
+  assert.equal(life.offPeak, 110);
   await ledger.flush();
 });
