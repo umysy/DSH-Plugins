@@ -21,13 +21,13 @@
 # 跟随 main（总拿最新）
 dsh plugin --profile web add "github:umysy/DSH-Plugins"
 
-# 固定版本（推荐给正式使用）
-dsh plugin --profile web add "github:umysy/DSH-Plugins#v0.3.1"
+# 固定版本（推荐给正式使用；tag 见 Releases）
+dsh plugin --profile web add "github:umysy/DSH-Plugins#v0.3.2"
 ```
 
 装完**重启 Harness**（插件发现按进程缓存），刷新页面即可。
 
-> 固定版本的 tag 见 [Releases](https://github.com/umysy/DSH-Plugins/releases)。`v0.2.0`、`v0.3.0`、`v0.3.1` 均可用于 `#<tag>` 形式；`main` 上还有尚未打 tag 的 `0.3.2`（修复凭据轮换竞态）。
+> 已发布的 tag：`v0.2.0`、`v0.3.0`、`v0.3.1`、`v0.3.2`。若某个 tag 尚未发布，`#<tag>` 会安装失败，此时用 `main` 即可。
 
 ### 方式二：桌面端 App
 
