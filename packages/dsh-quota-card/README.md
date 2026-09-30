@@ -155,9 +155,12 @@ GET https://platform.deepseek.com/api/v0/usage/amount?month=M&year=Y    → 该�
 
 - 该 token 是**可复用的控制台会话凭据**，与推理 API Key 是两种东西（实测：API Key 与 DSH 账号凭据都被控制台拒绝，只有这个 token 被接受）
 - 它由 DSH 凭据服务保管（`ctx.credentials`，键名 `DEEPSEEK_USER_TOKEN`）；也可以用同名环境变量覆盖
+- 写入前会做**合理性校验**（长度 16–4096、不含空白）：`PASTE` 这类占位符或整条命令行会被拒绝，不会让后续扫描以「认证失败」掩盖真实原因
+- **「累计用量」显示的是计费 token**（总和 − 缓存读取）。缓存读取占原始总和约 98%，却只按 cache-miss 的约 2% 计价，直接显示总和会让「用量」与「消费」严重不成比例；悬停可看「计费 / 缓存读取 / 总和」三层明细
 - `/quota-card/token` 是**唯一会写入的路由**：只接受回环地址且**非跨站**的请求（用 `Sec-Fetch-Site` 防 DNS-rebinding），写完后只回显遮蔽片段，绝不回显 token 本身
 - **这些接口是未公开的**，DeepSeek 改版即可能失效。失效时 `snapshot.platform` 整体缺失，卡片**静默退回**本地账本口径 —— 余额、今日/本月、峰谷判定永远不受影响
 - 扫描为逐月请求，最多 48 个月（可配），连续 3 个零消费月提前停止；结果缓存 10 分钟并落盘 `$DSH_HOME/quota-card/platform.json`，重启后立刻可见
+- 扫描失败会记成**具名原因**（`auth-failed` / `http-429` / `failed:2026-07:TimeoutError`）：`/quota-card/health` 的 `platform.history.lastError` 与 `lastFailure` 能直接指出哪个月、什么原因，而不是只给一个失败计数
 
 ### 卡片高度可拖动
 

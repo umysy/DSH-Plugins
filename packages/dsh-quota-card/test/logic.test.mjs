@@ -33,6 +33,7 @@ import {
   shiftMonth,
   sumMonthCost,
   sumMonthTokens,
+  tokenLooksValid,
 } from '../lib/platform.js';
 import {
   addTotals,
@@ -630,6 +631,21 @@ test('platformAuthFailure recognises the console envelope', () => {
   assert.equal(platformAuthFailure(500, null), false);
 });
 
+test('tokenLooksValid rejects the shapes that actually get pasted by mistake', () => {
+  assert.equal(tokenLooksValid('Y2w1Y52p9rYUwLtzGZMmnG' + 'x'.repeat(44)), true, 'a real 64-char token');
+  assert.equal(tokenLooksValid('a'.repeat(16)), true, 'the minimum accepted length');
+  // The two mistakes made while building this, caught before the store.
+  assert.equal(tokenLooksValid('PASTE'), false, 'a placeholder left in place');
+  assert.equal(tokenLooksValid('$env:DEEPSEEK_USER_TOKEN="Bearer x"; node tools/set-platform-token.mjs'), false, 'a whole command line');
+  assert.equal(tokenLooksValid('too short'), false);
+  assert.equal(tokenLooksValid('has whitespace in the middle of it'), false);
+  assert.equal(tokenLooksValid('line\nbreak\nvalue here ok'), false);
+  assert.equal(tokenLooksValid('a'.repeat(4097)), false, 'beyond the length cap');
+  assert.equal(tokenLooksValid(''), false);
+  assert.equal(tokenLooksValid(null), false);
+  assert.equal(tokenLooksValid(12345), false);
+});
+
 test('sumMonthCost and sumMonthTokens read the console payload shape', () => {
   const costPayload = {
     code: 0,
@@ -664,6 +680,10 @@ test('sumMonthCost and sumMonthTokens read the console payload shape', () => {
   assert.equal(tokens.tokens, 1200); // REQUEST excluded
   assert.equal(tokens.requests, 3);
   assert.equal(tokens.byType.PROMPT_CACHE_HIT_TOKEN, 1000);
+  // Cache-hit reads dominate the raw sum but are billed at ~2% of a cache miss,
+  // so the billed figure excludes them. 1200 raw - 1000 cache hits = 200.
+  assert.equal(tokens.cacheHits, 1000);
+  assert.equal(tokens.billed, 200);
   // The array form of `amount.biz_data` (an older/other deployment) also works.
   assert.equal(sumMonthTokens({ code: 0, data: { biz_data: [amountPayload.data.biz_data] } }).tokens, 1200);
 
@@ -671,24 +691,29 @@ test('sumMonthCost and sumMonthTokens read the console payload shape', () => {
   assert.equal(facts.month, '2026-09');
   assert.equal(facts.cost, 200);
   assert.equal(facts.tokens, 1200);
+  assert.equal(facts.billed, 200);
+  assert.equal(facts.cacheHits, 1000);
   assert.equal(facts.requests, 3);
   assert.equal(aggregatePlatformUsage(null, null, { year: 2026, month: 9 }), null);
 });
 
 test('foldMonths totals a spend history and reports its coverage', () => {
   const months = [
-    { month: '2026-09', cost: 12.5, tokens: 1_000_000, requests: 40, currency: 'CNY', byModel: { 'deepseek-flash': 1_000_000 } },
-    { month: '2026-08', cost: 7.5, tokens: 500_000, requests: 20, currency: 'CNY', byModel: { 'deepseek-flash': 300_000, 'deepseek-v4-pro': 200_000 } },
+    { month: '2026-09', cost: 12.5, tokens: 1_000_000, billed: 20_000, cacheHits: 980_000, requests: 40, currency: 'CNY', byModel: { 'deepseek-flash': 1_000_000 } },
+    { month: '2026-08', cost: 7.5, tokens: 500_000, billed: 10_000, cacheHits: 490_000, requests: 20, currency: 'CNY', byModel: { 'deepseek-flash': 300_000, 'deepseek-v4-pro': 200_000 } },
   ];
   const total = foldMonths(months);
   assert.equal(total.cost, 20);
   assert.equal(total.tokens, 1_500_000);
+  assert.equal(total.billed, 30_000);
+  assert.equal(total.cacheHits, 1_470_000);
   assert.equal(total.requests, 60);
   assert.equal(total.oldestMonth, '2026-08');
   assert.equal(total.newestMonth, '2026-09');
   assert.equal(total.months, 2);
   assert.equal(total.byModel['deepseek-flash'], 1_300_000);
   assert.equal(foldMonths([]).cost, 0);
+  assert.equal(foldMonths([]).billed, 0);
 });
 
 test('month cursors walk across year boundaries', () => {

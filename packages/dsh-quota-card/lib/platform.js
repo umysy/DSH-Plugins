@@ -147,7 +147,19 @@ export function sumMonthTokens(payload) {
     const model = typeof group?.model === 'string' ? group.model : 'unknown';
     byModel[model] = (byModel[model] ?? 0) + groupTokens;
   }
-  return { tokens, requests, byModel, byType };
+  // Cache reads are about 98% of the raw sum and are billed at roughly 2% of the
+  // cache-miss rate. Reporting the raw sum alone would badly overstate what the
+  // account actually processed for money, so both are kept: `tokens` is the raw
+  // total and `billed` is what is charged (everything except the cache reads).
+  const cacheHits = byType.PROMPT_CACHE_HIT_TOKEN ?? 0;
+  return {
+    tokens,
+    billed: Math.max(0, tokens - cacheHits),
+    cacheHits,
+    requests,
+    byModel,
+    byType,
+  };
 }
 
 /**
@@ -159,13 +171,17 @@ export function aggregatePlatformUsage(costPayload, amountPayload, window, extra
   const hasAmount = amountPayload !== null && amountPayload !== undefined;
   if (!hasCost && !hasAmount) return null;
   const cost = hasCost ? sumMonthCost(costPayload) : { cost: 0, byModel: {}, currency: 'CNY' };
-  const tokens = hasAmount ? sumMonthTokens(amountPayload) : { tokens: 0, requests: 0, byModel: {}, byType: {} };
+  const tokens = hasAmount
+    ? sumMonthTokens(amountPayload)
+    : { tokens: 0, billed: 0, cacheHits: 0, requests: 0, byModel: {}, byType: {} };
   const month = String(window.year) + '-' + String(window.month).padStart(2, '0');
   return {
     month,
     cost: cost.cost,
     currency: cost.currency,
     tokens: tokens.tokens,
+    billed: tokens.billed,
+    cacheHits: tokens.cacheHits,
     requests: tokens.requests,
     byType: tokens.byType,
     byModel: { ...cost.byModel, ...tokens.byModel },
@@ -177,6 +193,8 @@ export function aggregatePlatformUsage(costPayload, amountPayload, window, extra
 export function foldMonths(months) {
   let cost = 0;
   let tokens = 0;
+  let billed = 0;
+  let cacheHits = 0;
   let requests = 0;
   let currency = 'CNY';
   const byModel = {};
@@ -185,6 +203,8 @@ export function foldMonths(months) {
   for (const entry of months ?? []) {
     cost += entry.cost;
     tokens += entry.tokens;
+    billed += entry.billed ?? entry.tokens;
+    cacheHits += entry.cacheHits ?? 0;
     requests += entry.requests;
     currency = entry.currency || currency;
     for (const [model, value] of Object.entries(entry.byModel ?? {})) {
@@ -196,6 +216,8 @@ export function foldMonths(months) {
   return {
     cost,
     tokens,
+    billed,
+    cacheHits,
     requests,
     currency,
     byModel,
@@ -222,6 +244,9 @@ const EMPTY_MONTH_STREAK = 3;
 /** Hard cap on `from`/`to`, whatever the config says. */
 export const MAX_SCAN_MONTHS = 120;
 
+/** Upper bound for a pasted credential; the real token is 64 chars. */
+export const MAX_TOKEN_LENGTH = 4096;
+
 /** `{ year, month }` shifted by whole months (month is 1-12). */
 export function shiftMonth(cursor, delta) {
   const index = cursor.year * 12 + (cursor.month - 1) + delta;
@@ -241,17 +266,50 @@ export function monthKey(cursor) {
 }
 
 /**
+ * Whether a pasted value can possibly be a console session token. It rejects the
+ * mistakes that actually happen — a placeholder left in place, a whole command
+ * line, a multi-line paste — instead of silently storing them and letting every
+ * later scan fail with a confusing auth error.
+ *
+ * Deliberately permissive on the charset: the credential is undocumented, so the
+ * check must not reject a future format.
+ */
+export function tokenLooksValid(value) {
+  if (typeof value !== 'string') return false;
+  const text = value.trim();
+  if (text.length < 16 || text.length > MAX_TOKEN_LENGTH) return false;
+  return !/\s/.test(text);
+}
+
+/**
  * One month's cost + amount payloads, or null when neither answered.
  * `request` is injected so the caller owns retries, timeouts, and headers.
+ * When both fail, the reason is attached so the caller can report WHY instead of
+ * only counting that something went wrong.
  */
 export async function fetchMonth(cursor, request) {
   const query = '?month=' + cursor.month + '&year=' + cursor.year;
+  const failures = [];
+  const attempt = async (url) => {
+    try {
+      return await request(url);
+    } catch (error) {
+      failures.push(String(error?.name ?? error?.message ?? error).slice(0, 40));
+      return null;
+    }
+  };
   const [cost, amount] = await Promise.all([
-    request(COST_URL + query).catch(() => null),
-    request(AMOUNT_URL + query).catch(() => null),
+    attempt(COST_URL + query),
+    attempt(AMOUNT_URL + query),
   ]);
-  if (cost === null && amount === null) return null;
+  if (cost === null && amount === null) {
+    return { failed: true, kind: failures.length > 0 ? failures.join('+') : 'no-response' };
+  }
   const facts = aggregatePlatformUsage(cost, amount, cursor, {});
+  if (facts === null) return { failed: true, kind: 'no-facts' };
+  if (cost === null || amount === null) {
+    facts.partial = cost === null ? 'cost-missing' : 'amount-missing';
+  }
   return facts;
 }
 
@@ -268,18 +326,20 @@ export async function fetchMonth(cursor, request) {
  * @param {number} options.months how far back to look (capped by MAX_SCAN_MONTHS).
  * @param {(url: string) => Promise<unknown|null>} options.request
  * @param {(progress: object) => void} [options.onMonth] progress callback.
- * @returns {Promise<{total: object, months: object[], stoppedBy: string}>}
+ * @returns {Promise<{total: object, months: object[], stoppedBy: string, failures: object[]}>}
  */
 export async function scanHistory(options) {
   const months = Math.min(Math.max(1, Number(options.months) || 1), MAX_SCAN_MONTHS);
   const collected = [];
+  const failures = [];
   let emptyRun = 0;
   let stoppedBy = 'range-exhausted';
   let scanned = 0;
   for (const cursor of monthRange(options.from, months)) {
     const facts = await fetchMonth(cursor, options.request);
     scanned += 1;
-    if (facts === null) {
+    if (facts === null || facts.failed === true) {
+      failures.push({ month: monthKey(cursor), kind: facts === null ? 'no-response' : facts.kind });
       stoppedBy = 'request-failed';
       break;
     }
@@ -301,7 +361,9 @@ export async function scanHistory(options) {
   const total = foldMonths(collected);
   total.scanned = scanned;
   total.stoppedBy = stoppedBy;
-  return { total, months: collected, stoppedBy };
+  total.failureCount = failures.length;
+  total.lastFailure = failures.length === 0 ? null : failures[failures.length - 1];
+  return { total, months: collected, stoppedBy, failures };
 }
 
 /**
@@ -326,7 +388,15 @@ export function createPlatformHistory(options) {
   /** @type {{payload: object, at: number}|null} */
   let cache = null;
   let inflight = null;
-  const counters = { scans: 0, failures: 0, monthsFetched: 0, lastError: '', tokenMissing: 0 };
+  const counters = {
+    scans: 0,
+    failures: 0,
+    monthsFetched: 0,
+    requestFailures: 0,
+    lastError: '',
+    lastFailure: null,
+    tokenMissing: 0,
+  };
 
   function snapshotPayload() {
     if (cache === null) return null;
@@ -342,6 +412,8 @@ export function createPlatformHistory(options) {
         counters.lastError = 'no-platform-token';
         return null;
       }
+      let authFailed = false;
+      let httpError = '';
       const headers = platformRequestHeaders(token, PLATFORM_USER_AGENT, PLATFORM_REFERER);
       const request = async (url) => {
         const response = await fetch(url, { headers, redirect: 'manual', signal: AbortSignal.timeout(15_000) });
@@ -350,21 +422,23 @@ export function createPlatformHistory(options) {
         try {
           json = JSON.parse(text);
         } catch {
+          counters.requestFailures += 1;
           return null;
         }
         if (platformAuthFailure(response.status, json)) {
-          counters.lastError = 'auth-failed';
-          counters.failures += 1;
+          authFailed = true;
+          counters.requestFailures += 1;
           return null;
         }
-        if (!response.ok || json === null || json.code !== 0) {
-          counters.lastError = 'http-' + response.status;
+        if (!response.ok || json.code !== 0) {
+          httpError = 'http-' + response.status;
+          counters.requestFailures += 1;
           return null;
         }
         return json;
       };
       const current = new Date();
-      const { total, stoppedBy } = await scanHistory({
+      const { total, failures } = await scanHistory({
         from: { year: current.getFullYear(), month: current.getMonth() + 1 },
         months: options.months,
         request,
@@ -372,19 +446,29 @@ export function createPlatformHistory(options) {
           counters.monthsFetched += 1;
         },
       });
+      // Name the reason precisely: a bare counter cannot tell a signed-out token
+      // from a rate limit from a network drop, which is exactly what the user
+      // needs when a scan comes back short.
+      if (authFailed) counters.lastError = 'auth-failed';
+      else if (httpError !== '') counters.lastError = httpError;
+      else if (failures.length > 0) counters.lastError = 'failed:' + failures[0].month + ':' + failures[0].kind;
+      if (failures.length > 0) {
+        counters.lastFailure = failures[failures.length - 1];
+        counters.failures += failures.length;
+      }
       if (total.months === 0) {
         if (counters.lastError === '') counters.lastError = 'no-usage-returned';
         return null;
       }
       const payload = {
         ...total,
-        stoppedBy,
+        stoppedBy: total.stoppedBy,
         source: 'platform',
         scannedAt: now(),
         reason: reason ?? 'scheduled',
       };
       cache = { payload, at: now() };
-      counters.lastError = '';
+      if (counters.lastError.startsWith('no-')) counters.lastError = '';
       return payload;
     } catch (error) {
       counters.failures += 1;
@@ -422,6 +506,8 @@ export function createPlatformHistory(options) {
         cached: cache !== null,
         cachedAt: cache === null ? null : cache.at,
         months: cache === null ? 0 : (cache.payload.months ?? 0),
+        billedTokens: cache === null ? 0 : (cache.payload.billed ?? 0),
+        rawTokens: cache === null ? 0 : (cache.payload.tokens ?? 0),
       };
     },
   };

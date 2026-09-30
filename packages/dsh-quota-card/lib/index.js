@@ -22,7 +22,7 @@ import { dirname, join } from 'node:path';
 
 import { normalizeConfig, toPublicConfig } from './config.js';
 import { createLedger } from './ledger.js';
-import { createPlatformHistory } from './platform.js';
+import { createPlatformHistory, tokenLooksValid } from './platform.js';
 import { resolveTier, zoneParts } from './pricing.js';
 
 /** Cordis plugin name (also the ledger namespace and the route prefix). */
@@ -31,9 +31,6 @@ export const name = 'quota-card';
 const ROUTE_SNAPSHOT = '/quota-card/snapshot';
 const ROUTE_HEALTH = '/quota-card/health';
 const ROUTE_TOKEN = '/quota-card/token';
-
-/** Upper bound for a pasted credential; the real token is ~64 chars. */
-const MAX_TOKEN_LENGTH = 4096;
 
 /** Upper bound for a JSON request body, so a wrong request cannot allocate. */
 const MAX_BODY_BYTES = 16 * 1024;
@@ -523,8 +520,15 @@ export function apply(ctx, rawConfig) {
             sendJson(request, response, 400, { ok: false, error: 'empty-token' });
             return;
           }
-          if (token.length > MAX_TOKEN_LENGTH) {
-            sendJson(request, response, 400, { ok: false, error: 'token-too-long' });
+          // Reject a placeholder or a whole command line before it reaches the
+          // credential store: storing junk makes every later scan fail with an
+          // auth error that says nothing about the real cause.
+          if (!tokenLooksValid(token)) {
+            sendJson(request, response, 400, {
+              ok: false,
+              error: 'implausible-token',
+              detail: 'expected a single token of 16-4096 characters with no whitespace',
+            });
             return;
           }
           await credentials.set(config.platformTokenRef, token);

@@ -45,7 +45,20 @@ async function main() {
   if (typeof token !== 'string' || token.trim() === '') {
     console.log('DEEPSEEK_USER_TOKEN is not set, so there is nothing to store.');
     console.log('Set it for this command only, e.g. in PowerShell:');
-    console.log('  $env:DEEPSEEK_USER_TOKEN="Bearer …"; node packages/dsh-quota-card/tools/set-platform-token.mjs');
+    console.log('  $env:DEEPSEEK_USER_TOKEN=(Get-Clipboard).Trim(); node packages/dsh-quota-card/tools/set-platform-token.mjs');
+    process.exitCode = 1;
+    return;
+  }
+
+  // Catch the mistakes that actually happened while building this: a placeholder
+  // left in place, or a whole command line copied instead of the header value.
+  const candidate = token.trim().replace(/^bearer\s+/i, '').trim();
+  if (candidate.length < 16 || /\s/.test(candidate)) {
+    console.log('Refusing to store this: it does not look like a single token.');
+    console.log('  length        :', candidate.length, '(expected at least 16)');
+    console.log('  has whitespace:', /\s/.test(candidate));
+    console.log('Copy the Authorization VALUE: DevTools → Network → an api/v0 request →');
+    console.log('Headers → Request Headers → right-click the value → Copy value.');
     process.exitCode = 1;
     return;
   }
@@ -53,7 +66,7 @@ async function main() {
   const response = await fetch(baseUrl + '/quota-card/token', {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify({ token: token.trim() }),
+    body: JSON.stringify({ token: candidate }),
   });
   let body = null;
   try {

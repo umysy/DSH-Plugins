@@ -395,6 +395,9 @@ window.__ModuleLoader__.load({
       lifetimeTokens: '\u7d2f\u8ba1\u7528\u91cf',
       sinceInstall: '\u81ea\u672c\u63d2\u4ef6\u5b89\u88c5\u8d77\u7d2f\u8ba1\uff08\u672c\u5730\u8d26\u672c\uff09',
       platformSource: '\u6765\u81ea DeepSeek \u5f00\u653e\u5e73\u53f0\u5386\u53f2\u8bb0\u5f55',
+      tokensBilled: '\u8ba1\u8d39 token\uff08\u672a\u547d\u4e2d\u7f13\u5b58 + \u7f13\u5b58\u5199\u5165 + \u8f93\u51fa\uff09',
+      tokensCached: '\u7f13\u5b58\u547d\u4e2d\u8bfb\u53d6\uff08\u4ec5\u7ea6 2% \u4ef7\uff09',
+      tokensTotal: 'token \u603b\u548c\uff08\u542b\u7f13\u5b58\u8bfb\u53d6\uff09',
       requests: '\u6b21\u8bf7\u6c42',
       peakPeriod: '\u9ad8\u5cf0\u65f6\u6bb5\uff1a\u5468\u4e00\u81f3\u5468\u4e94',
       offPeakNote: '\uff08\u5176\u4f59\u4e3a\u7a7a\u95f2\u65f6\u6bb5\uff09',
@@ -431,6 +434,9 @@ window.__ModuleLoader__.load({
       lifetimeTokens: 'Total tokens',
       sinceInstall: 'counted locally, since this plugin was installed',
       platformSource: 'from the DeepSeek platform account history',
+      tokensBilled: 'Billed tokens (cache miss + cache write + output)',
+      tokensCached: 'Cache-hit reads (billed at ~2%)',
+      tokensTotal: 'Total tokens (including cache reads)',
       requests: 'requests',
       peakPeriod: 'Peak: Mon\u2013Fri',
       offPeakNote: '(all other hours are off-peak)',
@@ -723,17 +729,27 @@ window.__ModuleLoader__.load({
       // to the local ledger's own range, labelled so the difference is obvious.
       var hasPlatform = platform !== null && platform.error === undefined && platform.cost !== undefined;
       if (hasPlatform) {
+        var platformSpan = (platform.oldestMonth || '?') + ' ~ ' + (platform.newestMonth || '?');
+        // The raw token sum is dominated by cache reads (~98%), which are billed
+        // at about a fiftieth of a cache miss. The headline shows the BILLED
+        // tokens so the number beside the money means something, and the tooltip
+        // breaks the total down.
+        var billedTokens = platform.billed === undefined ? platform.tokens : platform.billed;
         rows.push({
           key: 'lifeCost',
           label: t('lifetimeCost'),
           value: formatMoney(platform.cost, platform.currency || 'CNY'),
-          title: (platform.oldestMonth || '?') + ' ~ ' + (platform.newestMonth || '?') + '\n' + t('platformSource'),
+          title: platformSpan + '\n' + t('platformSource'),
         });
         rows.push({
           key: 'lifeTokens',
           label: t('lifetimeTokens'),
-          value: formatTokens(platform.tokens),
-          title: formatTokens(platform.requests) + ' ' + t('requests') + '\n' + t('platformSource'),
+          value: formatTokens(billedTokens),
+          title: platformSpan + '\n' + t('platformSource')
+            + '\n' + t('tokensBilled') + ': ' + formatTokens(billedTokens)
+            + '\n' + t('tokensCached') + ': ' + formatTokens(platform.cacheHits || 0)
+            + '\n' + t('tokensTotal') + ': ' + formatTokens(platform.tokens)
+            + '\n' + formatTokens(platform.requests) + ' ' + t('requests'),
         });
       } else if (life !== null) {
         rows.push({
